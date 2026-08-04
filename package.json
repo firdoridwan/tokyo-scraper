@@ -1,0 +1,27 @@
+{
+  "name": "tokyo-scraper",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tokyo Scraper — professional business directory data extraction tool",
+  "license": "UNLICENSED",
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "concurrently -n api,web -c blue,magenta \"npm:dev:api\" \"npm:dev:web\"",
+    "dev:api": "npm run dev --workspace backend",
+    "dev:web": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "start": "npm run start --workspace backend",
+    "preview": "npm run preview --workspace frontend",
+    "clean": "rm -rf node_modules backend/node_modules frontend/node_modules frontend/dist"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

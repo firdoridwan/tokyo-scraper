@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Runtime data (database, exports, logs are machine-local artifacts)
+data/*.sqlite
+data/*.sqlite-journal
+data/*.sqlite-wal
+data/*.sqlite-shm
+data/exports/*
+data/logs/*
+!data/exports/.gitkeep
+!data/logs/.gitkeep
+
+# Environment
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Playwright
+playwright-report/
+test-results/
+.playwright/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp
+
+# Logs
+npm-debug.log*
+*.log

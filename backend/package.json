@@ -1,0 +1,27 @@
+{
+  "name": "@tokyo-scraper/backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Tokyo Scraper REST API",
+  "type": "module",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^13.0.2",
+    "compression": "^1.8.1",
+    "cors": "^2.8.5",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^17.4.2",
+    "express": "^4.21.2",
+    "helmet": "^8.1.0",
+    "p-limit": "^7.3.1",
+    "playwright": "^1.62.1",
+    "zod": "^3.24.1"
+  }
+}
