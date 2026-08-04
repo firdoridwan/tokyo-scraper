@@ -50,15 +50,6 @@ import { logger } from '../../utils/logger.js';
 
 const log = logger.child({ sourceId: 'hipages', module: 'crawler' });
 
-/** @param {string} fn @param {string} [detail] */
-const notImplemented = (fn, detail) =>
-  ApiError.notImplemented(`hipages.crawler.${fn}() is not implemented yet.`, {
-    sourceId: 'hipages',
-    module: 'crawler',
-    fn,
-    ...(detail ? { detail } : {}),
-  });
-
 /** Absolute base every discovered path is resolved against. */
 const SITE_ORIGIN = 'https://hipages.com.au';
 
@@ -232,22 +223,30 @@ export function resolveNextPageUrl(html, currentUrl = SITE_ORIGIN) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Loads a single results page and returns its raw markup for the pure helpers.
+ * Loads one hipages page through the injected context and returns its markup.
  *
- * Returning markup rather than a live handle keeps URL extraction pure and
- * testable against saved fixtures.
+ * Listing and profile pages are fetched identically — same navigation, same
+ * settle, same failure handling — so they share this one implementation. The
+ * two exported wrappers exist because callers (and errors) benefit from saying
+ * *which kind* of page failed, not because the behaviour differs.
+ *
+ * Returning markup rather than a live handle keeps the pure helpers and the
+ * parser testable against saved fixtures.
  *
  * @param {object} context Playwright page (injected by the caller)
  * @param {string} url
- * @param {{ signal?: AbortSignal }} [options]
+ * @param {{ signal?: AbortSignal }} options
+ * @param {string} fn        Caller name, for error context
+ * @param {string} pageKind  Human label, for the error message
  * @returns {Promise<string>} Raw HTML
  */
-export async function fetchListingPage(context, url, options = {}) {
+async function fetchPage(context, url, options, fn, pageKind) {
   if (!context || typeof context.goto !== 'function') {
-    throw ApiError.badRequest(
-      'hipages.crawler.fetchListingPage() requires a page context with goto().',
-      { sourceId: 'hipages', module: 'crawler', fn: 'fetchListingPage' },
-    );
+    throw ApiError.badRequest(`hipages.crawler.${fn}() requires a page context with goto().`, {
+      sourceId: 'hipages',
+      module: 'crawler',
+      fn,
+    });
   }
   options.signal?.throwIfAborted();
 
@@ -255,17 +254,17 @@ export async function fetchListingPage(context, url, options = {}) {
   const status = response?.status?.() ?? null;
 
   if (status !== null && status >= 400) {
-    throw ApiError.badRequest(`hipages listing page returned HTTP ${status}.`, {
+    throw ApiError.badRequest(`hipages ${pageKind} page returned HTTP ${status}.`, {
       sourceId: 'hipages',
       module: 'crawler',
-      fn: 'fetchListingPage',
+      fn,
       url,
       status,
     });
   }
 
-  // Best-effort settle so late-rendered cards are present. Not reaching idle is
-  // normal on pages holding analytics/chat connections open.
+  // Best-effort settle so late-rendered content is present. Not reaching idle
+  // is normal on pages holding analytics/chat connections open.
   try {
     await context.waitForLoadState?.('networkidle', { timeout: SETTLE_TIMEOUT_MS });
   } catch {
@@ -274,6 +273,18 @@ export async function fetchListingPage(context, url, options = {}) {
 
   options.signal?.throwIfAborted();
   return context.content();
+}
+
+/**
+ * Loads a single results page and returns its raw markup for the pure helpers.
+ *
+ * @param {object} context Playwright page (injected by the caller)
+ * @param {string} url
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<string>} Raw HTML
+ */
+export async function fetchListingPage(context, url, options = {}) {
+  return fetchPage(context, url, options, 'fetchListingPage', 'listing');
 }
 
 /**
@@ -374,19 +385,19 @@ export async function collectListingUrls(context, params = {}, options = {}) {
 }
 
 /**
- * Loads a single business profile page.
+ * Loads a single business profile page and returns its raw markup.
  *
- * Out of scope for the listing collector, which discovers profile URLs without
- * opening them. Implementing this belongs to the detail-enrichment sprint.
+ * No phone-reveal interaction is needed: the number is already present in the
+ * page's hydration payload, which `parser.parseProfilePage()` reads. Clicking
+ * the reveal button would fire the site's click-tracking endpoint for no gain.
  *
- * @param {object} _context
- * @param {string} _url
- * @param {{ signal?: AbortSignal }} [_options]
+ * @param {object} context Playwright page (injected by the caller)
+ * @param {string} url
+ * @param {{ signal?: AbortSignal }} [options]
  * @returns {Promise<string>} Raw HTML
- * @throws {ApiError} Always — not implemented.
  */
-export async function fetchProfilePage(_context, _url, _options) {
-  throw notImplemented('fetchProfilePage', 'Must load the profile URL and return settled markup.');
+export async function fetchProfilePage(context, url, options = {}) {
+  return fetchPage(context, url, options, 'fetchProfilePage', 'profile');
 }
 
 export const crawler = {

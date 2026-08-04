@@ -36,7 +36,11 @@
  * Deliberately NOT collected
  * --------------------------
  * The hydration payload also carries an email address and outbound tracking
- * URLs. Neither is read here, by rule. Only the nine fields below are parsed.
+ * URLs. Neither is read here, by rule.
+ *
+ * Field set: the nine fields specified for the profile parser, plus `website`,
+ * added when the company processor needed to answer "does this company have a
+ * site?" — the processor must not re-read the markup itself to find out.
  *
  * Purity
  * ------
@@ -289,22 +293,88 @@ export function readHydrationData(html) {
 // Source 2 — schema.org JSON-LD
 // ─────────────────────────────────────────────────────────────────────────────
 
-/** Nodes describing the page/site itself rather than the listed business. */
-const NON_BUSINESS_LD_TYPES = new Set([
-  'Organization',
-  'WebSite',
+/**
+ * hipages tags the listed business's node with this `@id` suffix. It is the
+ * site's own convention and the only unambiguous marker in the graph.
+ */
+const TRADIE_NODE_ID_SUFFIX = '#tradie';
+
+/** Business profiles live under this path; category/SEO pages never do. */
+const PROFILE_URL_MARKER = '/connect/';
+
+/**
+ * Nodes that describe the page or the site rather than a listed business.
+ *
+ * `WebPage` matters most here: on a profile page its `url` is the profile URL,
+ * so it satisfies the profile-URL test while carrying none of the business's
+ * data. Matching it silently emptied the rating fields.
+ */
+const STRUCTURAL_LD_TYPES = new Set([
   'WebPage',
+  'WebSite',
+  'Organization',
   'BreadcrumbList',
   'ImageObject',
+  'Service',
+  'Product',
+  'FAQPage',
+  'ItemList',
 ]);
+
+/**
+ * Decides whether a graph node describes an actual listed business.
+ *
+ * Identification is POSITIVE, and that matters. An earlier version matched by
+ * exclusion — "the node that isn't the Organization/WebSite/WebPage/
+ * BreadcrumbList" — which worked on profile pages and failed badly everywhere
+ * else: a category listing page carries `Service` and `Product` nodes, so the
+ * parser happily returned `companyName: "Best Electricians in Sydney NSW
+ * (3 Free Quotes)"` for a page containing no business at all. Wrong data that
+ * looks right is worse than no data, so a node now has to prove it is a
+ * business rather than merely fail to prove it isn't.
+ *
+ * @param {unknown} node
+ * @returns {boolean}
+ */
+function isTradieNode(node) {
+  return (
+    node !== null &&
+    typeof node === 'object' &&
+    typeof node['@id'] === 'string' &&
+    node['@id'].endsWith(TRADIE_NODE_ID_SUFFIX)
+  );
+}
+
+/**
+ * Secondary test, used only when no `#tradie` node exists.
+ *
+ * Two conditions, both required. The node must point at a profile URL —
+ * businesses live under `/connect/<key>`, while the SEO `Service` and `Product`
+ * nodes on category pages reference `/find/...`. And it must not be one of the
+ * structural nodes that merely *describe* the page, which share that same URL.
+ *
+ * Note what is deliberately NOT used: `aggregateRating` and `hasOfferCatalog`.
+ * They look like business markers, but a category page's `Product` node carries
+ * a rating ("4.9 from 8911 ratings") and its `Service` node carries a
+ * catalogue — matching on those is what made this return an SEO headline as a
+ * company name.
+ *
+ * @param {unknown} node
+ * @returns {boolean}
+ */
+function isBusinessNode(node) {
+  if (!node || typeof node !== 'object') return false;
+  if (STRUCTURAL_LD_TYPES.has(node['@type'])) return false;
+
+  const url = typeof node.url === 'string' ? node.url : null;
+  return url !== null && url.includes(PROFILE_URL_MARKER);
+}
 
 /**
  * Finds the schema.org node describing the listed business.
  *
- * The node's `@type` is the trade itself (`Electrician`, `Plumber`, …) so it
- * cannot be matched by name. It is identified by exclusion: the one graph entry
- * that is not the hipages organisation, the website, the page, or its
- * breadcrumbs.
+ * The node's `@type` is the trade itself (`Electrician`, `Plumber`, …), so it
+ * cannot be matched by type name — see `isBusinessNode` for how it is found.
  *
  * @param {string} html
  * @returns {object|null}
@@ -322,13 +392,12 @@ export function readJsonLdBusiness(html) {
       continue;
     }
 
-    const nodes = Array.isArray(parsed['@graph'])
-      ? parsed['@graph']
-      : [parsed].flat();
+    const nodes = Array.isArray(parsed['@graph']) ? parsed['@graph'] : [parsed].flat();
 
-    const business = nodes.find(
-      (node) => node && typeof node === 'object' && !NON_BUSINESS_LD_TYPES.has(node['@type']),
-    );
+    // The `#tradie` marker wins outright, wherever it sits in the graph. Taking
+    // the first node that merely looks plausible would depend on graph order —
+    // and on a profile page the `WebPage` node comes first.
+    const business = nodes.find(isTradieNode) ?? nodes.find(isBusinessNode);
     if (business) return business;
   }
   return null;
@@ -366,6 +435,24 @@ function readPhoneNumber(data) {
     cleanString(data?.page?.mobile) ??
     cleanString(data?.site?.primary_location?.phone) ??
     cleanString(data?.site?.primary_location?.mobile)
+  );
+}
+
+/**
+ * Reads the company's own website, as the profile states it.
+ *
+ * The value is returned VERBATIM (bar trimming) because hipages stores it
+ * unnormalised — real profiles carry `"www.example.com.au/"` with no scheme,
+ * alongside `""` and `null` for "none". Inventing a scheme here would mean the
+ * parser reporting something the page does not say. Turning this into a
+ * navigable URL is the consumer's job; see `companyProcessor.service.js`.
+ *
+ * @param {object|null} data
+ * @returns {string|null} Raw website value, or null when the profile has none.
+ */
+function readWebsite(data) {
+  return (
+    cleanString(data?.site?.website) ?? cleanString(data?.site?.primary_location?.website)
   );
 }
 
@@ -591,6 +678,7 @@ function readReviews(data, ld) {
  * @typedef {object} HipagesProfile
  * @property {string|null} companyName
  * @property {string|null} phoneNumber
+ * @property {string|null} website Raw, un-normalised — may lack a scheme
  * @property {object|null} businessLocation
  * @property {object|null} about
  * @property {object[]}    services
@@ -640,6 +728,7 @@ export function parseProfilePage(html) {
   return {
     companyName: readCompanyName(data, ld),
     phoneNumber: readPhoneNumber(data),
+    website: readWebsite(data),
     businessLocation: readBusinessLocation(data),
     about: readAbout(data),
     services: readServices(data, ld),

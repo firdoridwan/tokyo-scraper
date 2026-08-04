@@ -27,7 +27,13 @@ const INSPECTIONS_DIR = path.join(config.paths.data, 'inspections');
 const CAPTURE_FILE = 'page.html';
 
 /**
- * Locates the newest capture directory containing a `page.html`.
+ * Locates the newest capture that is actually a business profile.
+ *
+ * "Newest capture" alone is not good enough: `inspector.js` also saves listing
+ * pages, and running the profile parser over one of those is meaningless. So
+ * candidates are walked newest-first and the first one carrying profile data is
+ * used. If none does, the newest is returned anyway so the parser reports the
+ * real problem rather than this script inventing one.
  *
  * Capture folders are named with a leading ISO timestamp, so a lexical sort is
  * a chronological sort — no need to stat every directory.
@@ -50,16 +56,24 @@ async function findLatestCapture() {
     .sort()
     .reverse();
 
+  /** @type {string|null} */
+  let newestReadable = null;
+
   for (const name of candidates) {
     const candidate = path.join(INSPECTIONS_DIR, name, CAPTURE_FILE);
+
+    let html;
     try {
-      await fs.access(candidate);
-      return candidate;
+      html = await fs.readFile(candidate, 'utf8');
     } catch {
-      // Capture folder without HTML — keep looking.
+      continue; // Capture folder without HTML — keep looking.
     }
+
+    newestReadable ??= candidate;
+    if (readHydrationData(html) || readJsonLdBusiness(html)) return candidate;
   }
 
+  if (newestReadable) return newestReadable;
   throw new Error(`No ${CAPTURE_FILE} found under ${INSPECTIONS_DIR}.`);
 }
 
