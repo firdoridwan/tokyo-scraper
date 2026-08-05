@@ -45,10 +45,15 @@ function normalizeParams(source, params = {}) {
 
 export const jobService = {
   /**
-   * Creates a job and hands it to the runner.
+   * Creates a job and runs it.
+   *
+   * Awaits the run rather than returning a queued record: with no queue and no
+   * polling, the response IS the completion notice, so the caller receives the
+   * finished job — status, company count and export filename included.
+   *
    * @param {{ sourceId: string, params?: Record<string, unknown> }} payload
    */
-  create({ sourceId, params }) {
+  async create({ sourceId, params }) {
     const source = requireSource(sourceId);
     const normalizedParams = normalizeParams(source, params);
     const now = new Date().toISOString();
@@ -73,7 +78,7 @@ export const jobService = {
     jobRepository.create(job);
     logger.info('Job created', { jobId: job.id, sourceId: job.sourceId });
 
-    return scrapeRunner.enqueue(job, jobRepository);
+    return scrapeRunner.run(job, jobRepository);
   },
 
   /** @param {import('../repositories/types.js').ListQuery} query */

@@ -11,10 +11,17 @@ export const resultController = {
     });
   }),
 
-  /** Returns 501 until the exporter milestone — handled by the error middleware. */
-  export: asyncHandler(async (req, res) =>
-    sendSuccess(res, resultService.export(req.validatedQuery)),
-  ),
+  /**
+   * Sends a completed job's CSV as a file download.
+   *
+   * The one endpoint that answers with a file rather than the JSON envelope —
+   * `res.download()` sets `Content-Disposition: attachment`, which is what makes
+   * the browser save it instead of rendering it.
+   */
+  export: asyncHandler(async (req, res) => {
+    const { filePath, fileName } = resultService.export(req.validatedQuery);
+    return res.download(filePath, fileName);
+  }),
 };
 
 export default resultController;

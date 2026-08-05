@@ -1,13 +1,12 @@
 /**
  * hipages — listing collector test script.
  *
- * Opens a hipages category URL with Playwright, walks its pagination, and
- * prints what was collected: pages visited, total company profile URLs, and the
- * first ten URLs.
+ * Walks a hipages category through the directory API and prints what was
+ * collected: pages requested, total company profile URLs, and the first ten.
  *
- * It creates the browser and injects the page into the crawler — the crawler
- * itself never launches Chromium, which is what keeps its pure functions
- * testable without one.
+ * It still creates the browser and injects the page, which is now a test in
+ * itself: collection no longer needs a browser, and this proves the collector
+ * still accepts the context every other caller passes it.
  *
  * It collects URLs and stops. No profile is opened, no company data is parsed,
  * nothing is written to a database or a CSV.
@@ -29,10 +28,9 @@ const PREVIEW_COUNT = 10;
 
 /** Plain-English gloss on why the walk stopped. */
 const TERMINATION_NOTES = {
-  'no-next-link': 'no rel="next" link on the last page fetched',
-  'max-pages': 'hit the maxPages limit supplied by the caller',
-  'page-ceiling': 'hit the crawler’s absolute page ceiling',
-  'already-visited': 'pagination pointed back at a page already fetched',
+  'no-more-results': 'the directory API returned an empty page',
+  'max-pages': 'collected the maxPages × 10 companies the caller asked for',
+  'page-ceiling': 'the next offset would exceed the API’s maximum of 90',
   aborted: 'cancelled via AbortSignal',
 };
 

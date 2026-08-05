@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Globe, Info } from 'lucide-react';
+import { CheckCircle2, Download, Globe, Info } from 'lucide-react';
 
 import { PageHeader } from '@/components/common/PageHeader.jsx';
 import { SectionCard } from '@/components/common/SectionCard.jsx';
@@ -12,15 +12,17 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert.jsx';
 import { Button } from '@/components/ui/button.jsx';
 import { Skeleton } from '@/components/ui/skeleton.jsx';
 
+import { resultsApi } from '@/api/services/results.api.js';
 import { useSources } from '@/hooks/useSources.js';
 import { useCreateJob } from '@/hooks/useJobs.js';
 
 /**
  * New Scrape — source selection plus the dynamic parameter form.
  *
- * "Start Scraping" posts to `POST /api/v1/jobs`, which accepts and queues the
- * job for real. The job stays queued until the scraper engine exists; the page
- * says so rather than pretending work has begun.
+ * "Start Scraping" posts to `POST /api/v1/jobs`, which runs the scrape and
+ * answers when it is finished. There is no progress to show because there is
+ * nothing to poll: the response IS the completion, and it carries the company
+ * count and the CSV the run wrote.
  */
 export function ScrapePage() {
   const navigate = useNavigate();
@@ -49,7 +51,7 @@ export function ScrapePage() {
     <>
       <PageHeader
         title="New Scrape"
-        description="Choose a directory source, set your parameters, and queue an extraction job."
+        description="Choose a directory source, set your parameters, and run an extraction."
         actions={
           <Button asChild variant="outline" size="sm">
             <Link to="/jobs">View jobs</Link>
@@ -62,15 +64,54 @@ export function ScrapePage() {
       {createdJob ? (
         <Alert variant="success">
           <CheckCircle2 />
-          <AlertTitle>Job queued</AlertTitle>
+          <AlertTitle>Scrape complete</AlertTitle>
           <AlertDescription className="space-y-3">
+            <p>{createdJob.message}</p>
             <p>
-              <span className="font-mono text-xs text-foreground">{createdJob.id}</span> —{' '}
-              {createdJob.message}
+              Companies processed:{' '}
+              <span className="font-mono text-foreground">{createdJob.resultCount}</span>
             </p>
-            <Button size="sm" variant="outline" onClick={() => navigate(`/jobs/${createdJob.id}`)}>
-              Open job
-            </Button>
+            {createdJob.export?.files?.xlsx ? (
+              <p>
+                Excel file:{' '}
+                <span className="font-mono text-xs text-foreground">
+                  {createdJob.export.files.xlsx}
+                </span>
+              </p>
+            ) : null}
+            {createdJob.export?.fileName ? (
+              <p>
+                CSV file:{' '}
+                <span className="font-mono text-xs text-foreground">
+                  {createdJob.export.fileName}
+                </span>
+              </p>
+            ) : null}
+            {/* Plain links: the browser downloads the files itself. Excel leads;
+                CSV sits under it as the secondary option. */}
+            {createdJob.export?.files?.xlsx ? (
+              <div>
+                <Button asChild size="sm">
+                  <a href={resultsApi.downloadUrl(createdJob.id, 'xlsx')} download>
+                    <Download />
+                    Download Excel
+                  </a>
+                </Button>
+              </div>
+            ) : null}
+            <div className="flex flex-wrap items-center gap-3">
+              {createdJob.export?.fileName ? (
+                <Button asChild size="sm" variant="outline">
+                  <a href={resultsApi.downloadUrl(createdJob.id, 'csv')} download>
+                    <Download />
+                    Download CSV
+                  </a>
+                </Button>
+              ) : null}
+              <Button size="sm" variant="ghost" onClick={() => navigate(`/jobs/${createdJob.id}`)}>
+                Open job
+              </Button>
+            </div>
           </AlertDescription>
         </Alert>
       ) : null}

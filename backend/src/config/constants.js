@@ -34,9 +34,10 @@ export const ERROR_CODE = Object.freeze({
   INTERNAL: 'INTERNAL_SERVER_ERROR',
 });
 
-/** Supported export formats. The exporter itself is not implemented yet. */
+/** Supported export formats. `csv` and `xlsx` are written on every run. */
 export const EXPORT_FORMAT = Object.freeze({
   CSV: 'csv',
+  XLSX: 'xlsx',
   JSON: 'json',
 });
 

@@ -20,6 +20,16 @@
  * @property {string} updatedAt         ISO-8601
  * @property {string|null} startedAt
  * @property {string|null} finishedAt
+ * @property {object} [summary]         Pipeline counts, set when a run completes
+ * @property {{
+ *   fileName: string,
+ *   rowsWritten: number,
+ *   bytes: number,
+ *   files: { csv: string, xlsx: string }
+ * }} [export]
+ *   The files this run wrote. Present only on a completed job; it is what
+ *   `GET /results/export?jobId=…&format=…` resolves the download from.
+ *   `fileName` is the CSV, kept as the default-format field.
  */
 
 /**

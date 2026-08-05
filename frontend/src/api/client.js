@@ -47,6 +47,21 @@ function buildUrl(path, query) {
 }
 
 /**
+ * The URL `request()` would call, for links the browser follows itself.
+ *
+ * A file download is a navigation, not a fetch — it needs an `href`, not a
+ * response body. Exposing the builder keeps `BASE_URL` in this one module
+ * instead of being re-derived wherever a download link is rendered.
+ *
+ * @param {string} path
+ * @param {object} [query]
+ * @returns {string}
+ */
+export function apiUrl(path, query) {
+  return buildUrl(path, query);
+}
+
+/**
  * @param {string} path
  * @param {{ method?: string, body?: unknown, query?: object, signal?: AbortSignal, timeoutMs?: number }} [options]
  */

@@ -25,64 +25,47 @@
  */
 const SUPPORTED_INPUTS = [
   {
-    name: 'category',
-    label: 'Trade Category',
+    name: 'categoryUrl',
+    label: 'Category URL',
     type: 'text',
     required: true,
-    placeholder: 'e.g. plumbers, electricians, builders',
-    helpText: 'The trade or service category as it appears in the site URL.',
+    placeholder: 'https://hipages.com.au/find/electricians/nsw/sydney',
+    helpText: 'Paste a hipages category page URL. Its pagination is walked from here.',
   },
   {
-    name: 'location',
-    label: 'Location',
-    type: 'text',
-    required: true,
-    placeholder: 'e.g. sydney-nsw, melbourne-vic',
-    helpText: 'Suburb or city slug used by the directory.',
-  },
-  {
-    name: 'maxPages',
-    label: 'Max Pages',
+    name: 'limit',
+    label: 'Max Companies',
     type: 'number',
     required: false,
     min: 1,
-    max: 100,
-    defaultValue: 5,
-    helpText: 'Upper bound on result pages to visit. Keep this modest.',
-  },
-  {
-    name: 'includeDetails',
-    label: 'Detail Level',
-    type: 'select',
-    required: false,
-    defaultValue: 'listing',
-    options: [
-      { value: 'listing', label: 'Listing page only (fast)' },
-      { value: 'full', label: 'Open each profile (slow, more fields)' },
-    ],
-    helpText: 'Opening every profile page multiplies request volume.',
+    max: 50,
+    defaultValue: 10,
+    helpText: 'The run opens a profile and a website per company, and the request waits for it.',
   },
 ];
 
 /**
- * Columns this source is intended to produce per business record.
+ * Columns this source produces per business record.
  *
- * This is a *declaration of intent*, not a guarantee — no extraction exists
- * yet. `extractor.js` is the module that will have to satisfy this list.
+ * These are the columns the scraping pipeline actually fills and the CSV
+ * exporter actually writes — the UI lists them beside the form, so an
+ * aspirational list here would promise fields the downloaded file does not
+ * contain.
  *
  * @type {string[]}
  */
 const SUPPORTED_OUTPUTS = [
-  'businessName',
-  'category',
-  'suburb',
-  'state',
-  'phone',
+  'companyName',
+  'phoneNumber',
   'website',
-  'abn',
+  'email',
+  'businessLocation',
   'rating',
-  'reviewCount',
-  'profileUrl',
+  'totalReviews',
+  'credentials',
+  'services',
+  'hipagesUrl',
+  'status',
 ];
 
 /** @type {import('../types.js').SourceDescriptor} */
@@ -100,12 +83,18 @@ export const descriptor = {
   status: 'available',
 
   /**
-   * False until `crawler.js`, `parser.js`, and `extractor.js` are implemented
-   * AND `selectors.js` has been filled in against the live DOM. The registry
-   * refuses to load an adapter while this is false, so no half-built module can
-   * be executed by accident.
+   * True: this source executes. `crawler.js` walks the category, `parser.js`
+   * reads each profile, and `scrapingPipeline.service.js` sequences them with
+   * the website visitor and the email extractor.
+   *
+   * The UI reads this flag to decide whether to warn that a source cannot run,
+   * so leaving it false would make the page claim the run is a no-op.
+   *
+   * `extractor.js` and `selectors.js` remain stubs and are not on that path —
+   * they belong to the listing-page route (`parseListingPage`), which nothing
+   * calls yet.
    */
-  implemented: false,
+  implemented: true,
 
   /**
    * The directory paginates its result pages, so `crawler.collectListingUrls()`

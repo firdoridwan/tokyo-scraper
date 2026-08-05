@@ -1,10 +1,15 @@
 /**
  * Result service — read + export access to extracted rows.
  *
- * The export path is intentionally stubbed: writing CSV is a separate
- * milestone and would be dishonest to fake.
+ * The export path resolves a job's already-written CSV. It does not generate
+ * one: the file is produced during the run by `csvExporter.service.js`, so a
+ * download is a lookup, and re-running a scrape is never a side effect of
+ * clicking Download.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { EXPORT_FORMAT } from '../config/constants.js';
+import { config } from '../config/env.js';
 import { resultRepository } from '../repositories/index.js';
 import { jobService } from './job.service.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -27,19 +32,60 @@ export const resultService = {
   },
 
   /**
-   * Export. Not implemented — `csv-writer` is installed and
-   * `config.paths.exports` is configured, ready for the export milestone.
+   * Locates a file a completed job wrote, for download.
+   *
+   * Returns a path rather than a stream so the controller can hand it to
+   * `res.download()` and let Express own the headers — including the content
+   * type, which it derives from the extension.
+   *
+   * A run writes both formats, so this is a lookup by format, never a
+   * conversion: asking for `xlsx` returns the workbook that run produced.
+   *
+   * The filename is resolved from the job record and then `basename`d before it
+   * is joined to the exports directory. The job store is trusted today, but a
+   * value that becomes a filesystem path must not be able to carry `../` — that
+   * is one repository change away from being a real hole.
    *
    * @param {{ jobId?: string, format: string }} options
+   * @returns {{ filePath: string, fileName: string }}
    */
   export({ jobId, format }) {
-    if (!Object.values(EXPORT_FORMAT).includes(format)) {
-      throw ApiError.badRequest(`Unsupported export format "${format}"`, {
-        supported: Object.values(EXPORT_FORMAT),
+    if (format !== EXPORT_FORMAT.CSV && format !== EXPORT_FORMAT.XLSX) {
+      throw ApiError.notImplemented(`Export format "${format}" is not implemented.`, {
+        supported: [EXPORT_FORMAT.CSV, EXPORT_FORMAT.XLSX],
       });
     }
 
-    throw ApiError.notImplemented('Export is not implemented yet.', { jobId, format });
+    if (!jobId) {
+      throw ApiError.badRequest('A jobId is required — exports belong to a run.', {
+        example: '/api/v1/results/export?jobId=<id>&format=xlsx',
+      });
+    }
+
+    const job = jobService.getById(jobId);
+    // `export.fileName` is the CSV, kept for jobs recorded before the workbook
+    // existed; `export.files` carries every format a run wrote.
+    const fileName =
+      job.export?.files?.[format] ?? (format === EXPORT_FORMAT.CSV ? job.export?.fileName : null);
+
+    if (!fileName) {
+      throw ApiError.notFound(
+        `Job "${jobId}" has no ${format} export — it is ${job.status}.`,
+        { jobId, status: job.status, format },
+      );
+    }
+
+    const filePath = path.join(config.paths.exports, path.basename(fileName));
+
+    if (!fs.existsSync(filePath)) {
+      throw ApiError.notFound(`Export file "${fileName}" is no longer on disk.`, {
+        jobId,
+        fileName,
+        format,
+      });
+    }
+
+    return { filePath, fileName };
   },
 };
 

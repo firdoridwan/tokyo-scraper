@@ -56,6 +56,17 @@ const log = logger.child({ module: 'scrapingPipeline' });
 
 const VIEWPORT = { width: 1440, height: 900 };
 
+/**
+ * Companies the collector returns per page.
+ *
+ * Mirrors the page size the collector documents and enforces — it is the site
+ * API's own maximum (`page[limit]=11` is rejected), not a tuning knob. It is
+ * restated here rather than imported because this module must be able to size a
+ * request without reaching into the collector's internals, and the collector's
+ * public contract is stated in pages.
+ */
+const COLLECTOR_PAGE_SIZE = 10;
+
 /** @typedef {'success'|'skipped'|'failed'} CompanyStatus */
 
 /**
@@ -203,16 +214,39 @@ async function extractEmailFor(result) {
 }
 
 /**
+ * Turns a company count into the collector's page budget.
+ *
+ * The collector's contract is "walk up to N pages, ten companies each", so the
+ * pages needed for a company count is a division — and it is arithmetic the
+ * *caller* has no business doing. Asking an operator for both numbers means
+ * asking them to do this sum in their head, and getting it wrong silently caps
+ * the run: that is exactly what "Max Companies 50, Max Pages 1" did.
+ *
+ * Returns `null` when no count was requested, so the collector falls back to
+ * its own default (walk until the source runs out) rather than being handed a
+ * budget nobody asked for.
+ *
+ * @param {unknown} limit Requested company count
+ * @returns {number|null} Pages to walk, or null for "no budget"
+ */
+export function requiredPagesFor(limit) {
+  const requested = Number(limit);
+  if (!Number.isFinite(requested) || requested <= 0) return null;
+  return Math.ceil(requested / COLLECTOR_PAGE_SIZE);
+}
+
+/**
  * Runs the whole pipeline.
  *
  * @param {{
  *   categoryUrl?: string,
  *   category?: string,
  *   location?: string,
- *   maxPages?: number,
  *   profileUrls?: string[],
  *   limit?: number
  * }} params Either a category to collect from, or explicit profile URLs.
+ *   There is no page-budget parameter: `limit` is the only quantity a caller
+ *   states, and the pages needed to satisfy it are derived here.
  * @param {{
  *   signal?: AbortSignal,
  *   onDiscovered?: (info: { profileUrls: string[], discovered: number }) => void,
@@ -238,18 +272,25 @@ export async function runPipeline(params = {}, options = {}) {
     let profileUrls = params.profileUrls ?? [];
 
     if (profileUrls.length === 0) {
+      // The collector is told how many PAGES to walk; the caller stated how many
+      // COMPANIES it wants. Converting between the two is this layer's job, and
+      // the collector is unaware anything changed.
+      const requiredPages = requiredPagesFor(params.limit);
+
       const collected = await collectListingUrls(
         page,
         {
           listingUrl: params.categoryUrl,
           category: params.category,
           location: params.location,
-          maxPages: params.maxPages,
+          ...(requiredPages === null ? {} : { maxPages: requiredPages }),
         },
         { signal: options.signal },
       );
       profileUrls = collected.profileUrls;
       log.info('Discovered companies', {
+        requested: params.limit ?? null,
+        requiredPages,
         discovered: profileUrls.length,
         pagesVisited: collected.pagesVisited,
         terminationReason: collected.terminationReason,
@@ -257,8 +298,9 @@ export async function runPipeline(params = {}, options = {}) {
     }
 
     discovered = profileUrls.length;
-    // `limit` caps the work, not the discovery count — "found 47, processed 5"
-    // is the honest report, and hiding the 47 would misstate the source.
+    // Discovery is now sized to the request, so this usually trims nothing. It
+    // still matters for a count that is not a whole number of pages: asking for
+    // 25 walks three pages and discovers 30, and only 25 are processed.
     const selected = params.limit ? profileUrls.slice(0, params.limit) : profileUrls;
 
     options.onDiscovered?.({ profileUrls: selected, discovered });
@@ -318,6 +360,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   await main();
 }
 
-export const scrapingPipeline = { runPipeline, buildCompanyRecord, summarise };
+export const scrapingPipeline = { runPipeline, buildCompanyRecord, summarise, requiredPagesFor };
 
 export default scrapingPipeline;

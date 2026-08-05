@@ -334,12 +334,15 @@ ScrapeForm (validates presentationally)
           │   ├─ registry.requireSource()   → 404 on unknown source
           │   ├─ normalizeParams()          apply descriptor defaults → 422 if missing
           │   ├─ jobRepository.create()     persist
-          │   └─ scrapeRunner.enqueue()     ← STUB: parks the job as `queued`
+          │   └─ scrapeRunner.run()         runs the pipeline, exports the CSV,
+          │                                 resolves when the job is completed
           └─ sendSuccess(201, job)
-  └─ UI shows "Job queued" + the job id, links to the detail page
+  └─ UI shows "Scrape complete" + company count + CSV filename + Download
+      └─ GET /api/v1/results/export?jobId=…  → res.download() of that run's CSV
 ```
 
-Everything in that path is production code except the marked line.
+Everything in that path is production code. The run is synchronous: there is no
+queue and nothing to poll, so the response to the POST is the completion notice.
 
 ---
 

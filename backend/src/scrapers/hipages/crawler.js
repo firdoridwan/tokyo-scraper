@@ -12,39 +12,64 @@
  * strategy replaceable (link-based → infinite scroll) without touching a single
  * line of extraction code.
  *
- * Dependency injection
- * --------------------
- * No function below creates a browser. The runtime context (a Playwright page
- * or any object satisfying the same minimal interface) is passed IN. That keeps
- * these functions testable against a fake context, with no Chromium process
- * involved, and the two pure functions — `extractProfileUrls` and
- * `resolveNextPageUrl` — testable against saved HTML fixtures.
+ * Discovery runs against the site's own directory API
+ * ---------------------------------------------------
+ * The page's "View More" control is not infinite scroll and not a DOM trick: it
+ * issues one request to
  *
- * Why pagination is link-driven and never URL-arithmetic
- * -----------------------------------------------------
- * This is the load-bearing decision in the file, and it was made from evidence,
- * not preference. Probing the live site on 2026-08-04 showed:
+ *   GET https://gateway.hipages.com.au/directory/v1/businesses
+ *       ?filter[category]=…&filter[state]=…&filter[suburb]=…
+ *       &page[limit]=10&page[offset]=N
+ *
+ * and appends the returned businesses. That endpoint is what this collector
+ * calls. It needs no browser, no cookie and no key, answers in ~500 ms with
+ * JSON:API, and carries `profilePagePath` for every business — which is the
+ * only field discovery needs.
+ *
+ * Why offset arithmetic is safe HERE, when it was not on the HTML page
+ * -------------------------------------------------------------------
+ * The rule this file has always enforced is that a page number must never be
+ * synthesised, because the results page swallows unknown parameters. Probing on
+ * 2026-08-04 showed exactly that:
  *
  *   /find/electricians/nsw/sydney           → 200, 10 profiles
  *   /find/electricians/nsw/sydney?page=2    → 200, THE SAME 10 profiles
- *   /find/electricians/nsw/sydney?p=2       → 200, THE SAME 10 profiles
  *   /find/electricians/nsw/sydney/2         → 404
  *
- * An unknown query parameter is swallowed and the first page is served again,
- * with `<link rel="canonical">` still pointing at the un-parameterised URL.
- * A collector that incremented `?page=N` and stopped when a page yielded no new
- * URLs would therefore "work" — it would fetch page 1 twice, dedupe the second
- * copy to nothing, and report success. That is a fabricated result, and the
- * same shape of bug would silently cap every future run at one page.
+ * A collector incrementing `?page=N` there would refetch page one forever and
+ * report success — a fabricated result. The API does not have that failure
+ * mode, and probing on 2026-08-05 proved it rather than assuming it:
  *
- * So the next page is only ever taken from a positive signal in the markup
- * (`rel="next"`, a web standard rather than a site-specific guess). No link,
- * no next page. Every termination is reported with a reason so "stopped after
- * one page" can never be confused with "collected everything".
+ *   page[offset]=90  → 200, 10 businesses
+ *   page[offset]=95  → 400 "data.offset should be <= 90"
+ *   page[limit]=11   → 400 "data.limit should be <= 10"
+ *   past the end     → 200 with an EMPTY data array
+ *
+ * The endpoint states its own bounds and refuses an out-of-range offset instead
+ * of silently re-serving the first page. So the walk is bounded three ways —
+ * the caller's page budget, an empty response, and the API's own offset
+ * ceiling — and every termination still reports which one fired, so "stopped
+ * early" can never be confused with "collected everything".
+ *
+ * Dependency injection
+ * --------------------
+ * No function below creates a browser. The runtime context (a Playwright page
+ * or any object satisfying the same minimal interface) is still passed in and
+ * still used by `fetchProfilePage()`, which the company processor drives.
+ * `collectListingUrls()` no longer needs it — discovery is a plain HTTP call —
+ * but it keeps accepting it so every caller works unchanged.
+ *
+ * The HTML helpers below (`extractProfileUrls`, `resolveNextPageUrl`,
+ * `fetchListingPage`, `buildSearchUrl`) are retained: they are pure, they are
+ * the fallback if the API is withdrawn, and `buildSearchUrl` still turns a
+ * category + location into the URL this module parses.
  *
  * Scope note: this module collects profile URLs only. It does not open them.
  */
 import { ApiError } from '../../utils/ApiError.js';
+// `ApiError.badRequest()` cannot carry a `cause`; the constructor can, and a
+// network failure is exactly the case where the original error must survive.
+import { ERROR_CODE } from '../../config/constants.js';
 import { config } from '../../config/env.js';
 import { logger } from '../../utils/logger.js';
 
@@ -68,11 +93,30 @@ const ABSOLUTE_PAGE_CEILING = 200;
 /** Grace period for the network to fall quiet after `load` fires. */
 const SETTLE_TIMEOUT_MS = 10_000;
 
+/** The directory API behind the site's "View More" control. */
+const DIRECTORY_API_URL = 'https://gateway.hipages.com.au/directory/v1/businesses';
+
+/**
+ * Records per request. Not a preference — `page[limit]=11` is rejected with
+ * `400 "data.limit should be <= 10"`, so 10 is the API's own maximum.
+ */
+const API_PAGE_SIZE = 10;
+
+/**
+ * Highest offset the API accepts; `page[offset]=95` answers
+ * `400 "data.offset should be <= 90"`. With ten records a page that puts the
+ * reachable depth at roughly 100 businesses per category + suburb.
+ */
+const API_MAX_OFFSET = 90;
+
+/** Ceiling on how long one API request may take before it is abandoned. */
+const API_TIMEOUT_MS = 15_000;
+
 /**
  * Why a collection run stopped. Reported so a short run is never mistaken for
  * a complete one.
  *
- * @typedef {'no-next-link'|'max-pages'|'page-ceiling'|'already-visited'|'aborted'} TerminationReason
+ * @typedef {'no-more-results'|'max-pages'|'page-ceiling'|'aborted'} TerminationReason
  */
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +263,273 @@ export function resolveNextPageUrl(html, currentUrl = SITE_ORIGIN) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Directory API — the discovery path
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Turns a category page URL into the three filters the API expects.
+ *
+ * The site's URL shape is `/find/<category>/<state>/<suburb>` and the API's
+ * filters are those same three values, so this is a direct read rather than a
+ * lookup — no mapping table to drift out of date.
+ *
+ * Pure, and strict about what it accepts. A URL of another shape throws here,
+ * at the start of the run with the URL in the message, instead of becoming a
+ * silently empty result set later.
+ *
+ * @param {string} rawUrl A hipages category page URL
+ * @returns {{ category: string, state: string, suburb: string }}
+ */
+export function parseCategoryUrl(rawUrl) {
+  const fail = (detail) =>
+    ApiError.badRequest(`Not a hipages category URL: ${detail}`, {
+      sourceId: 'hipages',
+      module: 'crawler',
+      fn: 'parseCategoryUrl',
+      url: String(rawUrl),
+      expected: `${SITE_ORIGIN}/find/<category>/<state>/<suburb>`,
+    });
+
+  let url;
+  try {
+    url = new URL(String(rawUrl).trim());
+  } catch {
+    throw fail(`"${rawUrl}" is not a valid URL.`);
+  }
+
+  const segments = url.pathname.split('/').filter(Boolean);
+
+  if (segments[0] !== 'find') throw fail(`path "${url.pathname}" does not start with /find/.`);
+  if (segments.length !== 4) {
+    throw fail(
+      `path "${url.pathname}" has ${segments.length - 1} segment(s) after /find/, expected 3 ` +
+        '(category, state, suburb).',
+    );
+  }
+
+  const [, category, state, suburb] = segments.map((segment) =>
+    decodeURIComponent(segment).trim().toLowerCase(),
+  );
+
+  return { category, state, suburb };
+}
+
+/**
+ * Builds one directory API request URL.
+ *
+ * Exported because it is worth asserting against without a network call — the
+ * bracketed JSON:API parameter names (`filter[state]`, `page[offset]`) are easy
+ * to get subtly wrong and `URLSearchParams` encodes the brackets for us.
+ *
+ * @param {{ category: string, state: string, suburb: string }} filters
+ * @param {number} offset
+ * @returns {string}
+ */
+export function buildDirectoryRequestUrl(filters, offset) {
+  const query = new URLSearchParams({
+    'filter[state]': filters.state,
+    'filter[category]': filters.category,
+    'filter[suburb]': filters.suburb,
+    'page[limit]': String(API_PAGE_SIZE),
+    'page[offset]': String(offset),
+  });
+
+  return `${DIRECTORY_API_URL}?${query}`;
+}
+
+/**
+ * Turns a rejected `fetch()` into something a log can be read from.
+ *
+ * `fetch` reports every transport-layer fault the same way: a `TypeError` whose
+ * message is the constant string `"fetch failed"`. DNS failure, refused
+ * connection, reset socket, unreachable network and TLS failure are
+ * indistinguishable at that level — the diagnosis is one layer down, on
+ * `error.cause`, as `code` / `errno` / `syscall` / `hostname` / `address`.
+ *
+ * Reporting only `error.message` therefore destroys the entire diagnosis at the
+ * throw site: six different faults produce one identical, unactionable line and
+ * the operator cannot tell a DNS outage from a dropped socket. This function
+ * exists to stop that happening.
+ *
+ * Rejections that carry no `cause` — the request timeout, an abort — are
+ * described from the error itself, which for those cases is already meaningful.
+ *
+ * Pure: it reads an error and returns a plain object. It changes no behaviour,
+ * retries nothing, and decides nothing.
+ *
+ * @param {unknown} error The value `fetch()` rejected with
+ * @returns {{ summary: string, detail: Record<string, unknown> }}
+ *   `summary` is one line safe to put in a message; `detail` is the structured
+ *   context for the log and the error's details.
+ */
+export function describeFetchFailure(error) {
+  const cause = error?.cause ?? null;
+  // The system-level fields live on the cause when there is one, and on the
+  // error itself for aborts and other direct rejections.
+  const source = cause ?? error;
+
+  // System error codes are strings (`ENOTFOUND`, `UND_ERR_SOCKET`). A
+  // DOMException also has a `code`, but it is a legacy NUMBER (AbortError is
+  // 20) that identifies nothing useful — reported as-is it reads "failed: 20".
+  const systemCode = typeof source?.code === 'string' ? source.code : undefined;
+
+  const detail = {
+    errorName: error?.name,
+    errorMessage: error?.message,
+    causeName: cause?.name,
+    causeMessage: cause?.message,
+    code: systemCode,
+    errno: source?.errno,
+    syscall: source?.syscall,
+    hostname: source?.hostname,
+    address: source?.address,
+    port: source?.port,
+  };
+
+  // Absent fields are dropped rather than logged as nulls — a line of eight
+  // `null`s hides the two values that matter.
+  for (const [key, value] of Object.entries(detail)) {
+    if (value === undefined || value === null) delete detail[key];
+  }
+
+  // Preference order: the system code (ENOTFOUND, ECONNRESET…) names the fault
+  // outright; failing that a SPECIFIC error name does (AbortError). The generic
+  // names are skipped — "Error" and "TypeError" label nothing, and `TypeError:
+  // fetch failed` is the very wrapper this function exists to see past.
+  const GENERIC_NAMES = ['Error', 'TypeError'];
+  const specificName =
+    typeof error?.name === 'string' && !GENERIC_NAMES.includes(error.name) ? error.name : undefined;
+
+  const label = systemCode ?? specificName ?? error?.message ?? 'unknown error';
+
+  const explanation = detail.causeMessage ?? detail.errorMessage ?? null;
+  const summary =
+    explanation && explanation !== label ? `${label} — ${explanation}` : String(label);
+
+  return { summary, detail };
+}
+
+/**
+ * Reads one page of businesses from the directory API.
+ *
+ * The caller's `AbortSignal` and the request timeout both have to cancel the
+ * same request, so they are merged into one controller.
+ *
+ * @param {string} url
+ * @param {{ signal?: AbortSignal }} [options]
+ * @returns {Promise<object[]>} The `data` array, or `[]` when the page is empty
+ */
+async function fetchDirectoryPage(url, options = {}) {
+  options.signal?.throwIfAborted();
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('timeout')), API_TIMEOUT_MS);
+  options.signal?.addEventListener('abort', () => controller.abort(options.signal.reason), {
+    once: true,
+  });
+
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: {
+        accept: 'application/vnd.api+json',
+        'user-agent': config.scraper.userAgent,
+      },
+      signal: controller.signal,
+    });
+  } catch (error) {
+    // A caller cancelling is not a network fault; it stays a cancellation.
+    options.signal?.throwIfAborted();
+
+    const { summary, detail } = describeFetchFailure(error);
+    // Our own guard firing looks like any other abort from the outside, so the
+    // one thing only this scope knows is recorded explicitly.
+    const timedOut = controller.signal.aborted;
+
+    const context = {
+      sourceId: 'hipages',
+      module: 'crawler',
+      fn: 'fetchDirectoryPage',
+      url,
+      ...detail,
+      ...(timedOut ? { timedOut, timeoutMs: API_TIMEOUT_MS } : {}),
+    };
+
+    // Logged here because this is the only place the cause chain still exists:
+    // the error handler logs a message and a status, not an error's internals.
+    log.error('Directory API request failed', context);
+
+    throw new ApiError(400, `hipages directory API request failed: ${summary}`, {
+      code: ERROR_CODE.BAD_REQUEST,
+      details: context,
+      // The original error, chained — a stack-walking consumer keeps everything.
+      cause: error,
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  const body = await response.text();
+
+  if (!response.ok) {
+    // The API explains itself in `errors[].meta.message` ("data.offset should be
+    // <= 90"); surfacing that beats a bare status code.
+    let detail = null;
+    try {
+      detail = JSON.parse(body)?.errors?.[0]?.meta?.message ?? null;
+    } catch {
+      detail = null;
+    }
+    throw ApiError.badRequest(
+      `hipages directory API returned HTTP ${response.status}${detail ? ` — ${detail}` : ''}.`,
+      { sourceId: 'hipages', module: 'crawler', fn: 'fetchDirectoryPage', url, status: response.status },
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    throw ApiError.badRequest('hipages directory API returned a body that is not JSON.', {
+      sourceId: 'hipages',
+      module: 'crawler',
+      fn: 'fetchDirectoryPage',
+      url,
+    });
+  }
+
+  return Array.isArray(parsed?.data) ? parsed.data : [];
+}
+
+/**
+ * Reads the profile URL out of one API record.
+ *
+ * `profilePagePath` is preferred because it is the site's own path for that
+ * business; `key` is the documented fallback and produces the identical URL.
+ * A record carrying neither is skipped rather than turned into a guess.
+ *
+ * @param {object} record JSON:API resource object
+ * @returns {string|null} Absolute profile URL
+ */
+function toProfileUrl(record) {
+  const attributes = record?.attributes ?? {};
+  const path =
+    typeof attributes.profilePagePath === 'string' && attributes.profilePagePath.trim() !== ''
+      ? attributes.profilePagePath.trim()
+      : typeof attributes.key === 'string' && attributes.key.trim() !== ''
+        ? `${PROFILE_PATH_PREFIX}${attributes.key.trim()}`
+        : null;
+
+  if (path === null) return null;
+
+  try {
+    return new URL(path, SITE_ORIGIN).href;
+  } catch {
+    return null;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Navigation — the only functions that touch the injected page context
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -290,23 +601,34 @@ export async function fetchListingPage(context, url, options = {}) {
 /**
  * @typedef {object} ListingCollection
  * @property {string[]} profileUrls        De-duplicated absolute profile URLs
- * @property {string[]} pageUrls           Listing pages actually visited, in order
+ * @property {string[]} pageUrls           Pages actually requested, in order
  * @property {number}   pagesVisited
  * @property {number}   duplicatesRemoved  Repeat sightings dropped across all pages
  * @property {TerminationReason} terminationReason Why the walk stopped
  */
 
 /**
- * Walks the paginated result pages and collects the profile URLs found on them.
+ * Walks the directory API and collects business profile URLs.
  *
- * The primary entry point of this module. Honours `maxPages`, the configured
- * inter-request delay, and an `AbortSignal`, and stops as soon as no next-page
- * link is present.
+ * The primary entry point of this module, and unchanged in signature, inputs
+ * and output shape — only the source of the URLs moved from the results page's
+ * markup to the API behind its "View More" control. Every caller works as
+ * before.
  *
- * Accepts either a ready-made `listingUrl` or `category` + `location`, so a
- * caller holding a category URL does not have to take it apart first.
+ * `maxPages` keeps its old meaning. A results page showed ten businesses and an
+ * API page returns ten, so "walk up to N pages" is still "collect up to N × 10
+ * companies", and the result is truncated to that number. The one visible
+ * difference is that `maxPages: 5` now actually yields 50 URLs, where the HTML
+ * path stopped at 10 because the page carries no `rel="next"` link.
  *
- * @param {object} context Playwright page (injected)
+ * Three things end the walk, and each reports itself:
+ *   `max-pages`       the caller's budget was met
+ *   `no-more-results` the API returned an empty page
+ *   `page-ceiling`    the next offset would exceed the API's documented maximum
+ *
+ * @param {object} context Playwright page. Accepted for interface compatibility
+ *   and no longer used here — the API needs no browser — so callers, and the
+ *   company processor that shares this context, are unaffected.
  * @param {{ listingUrl?: string, category?: string, location?: string, maxPages?: number }} params
  * @param {{ signal?: AbortSignal, delayMs?: number }} [options]
  * @returns {Promise<ListingCollection>}
@@ -316,36 +638,36 @@ export async function collectListingUrls(context, params = {}, options = {}) {
     ? new URL(params.listingUrl).href
     : buildSearchUrl({ category: params.category, location: params.location });
 
+  const filters = parseCategoryUrl(startUrl);
+
   const maxPages = Number.isInteger(params.maxPages)
     ? Math.min(Math.max(params.maxPages, 1), ABSOLUTE_PAGE_CEILING)
     : ABSOLUTE_PAGE_CEILING;
+  const wanted = maxPages * API_PAGE_SIZE;
   const delayMs = options.delayMs ?? config.scraper.requestDelayMs;
 
-  /** @type {Set<string>} */
-  const profileUrls = new Set();
-  /** @type {Set<string>} */
-  const visited = new Set();
+  /** @type {Map<string, string>} key → profile URL. The key is the API's own
+   * business identifier, which is what the site de-duplicates on; the first
+   * page overlaps later ones by a record or two. */
+  const byKey = new Map();
   const pageUrls = [];
   let duplicatesRemoved = 0;
   /** @type {TerminationReason} */
-  let terminationReason = 'no-next-link';
+  let terminationReason = 'max-pages';
 
-  let nextUrl = startUrl;
-
-  while (nextUrl) {
+  for (let offset = 0; ; offset += API_PAGE_SIZE) {
     if (options.signal?.aborted) {
       terminationReason = 'aborted';
       break;
     }
-    if (visited.has(nextUrl)) {
-      // The site serves page one for unknown params, so a repeated URL means a
-      // pagination control is looping. Stopping here is what prevents that
-      // becoming an endless crawl.
-      terminationReason = 'already-visited';
+    if (byKey.size >= wanted) {
+      terminationReason = 'max-pages';
       break;
     }
-    if (pageUrls.length >= maxPages) {
-      terminationReason = pageUrls.length >= ABSOLUTE_PAGE_CEILING ? 'page-ceiling' : 'max-pages';
+    if (offset > API_MAX_OFFSET) {
+      // Asking anyway would earn a 400. Stopping here reports the ceiling as a
+      // ceiling instead of as a failed request.
+      terminationReason = 'page-ceiling';
       break;
     }
 
@@ -354,29 +676,38 @@ export async function collectListingUrls(context, params = {}, options = {}) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
-    visited.add(nextUrl);
-    const currentUrl = nextUrl;
+    const requestUrl = buildDirectoryRequestUrl(filters, offset);
+    log.info('Requesting directory page', { offset, page: pageUrls.length + 1 });
 
-    log.info('Fetching listing page', { url: currentUrl, page: pageUrls.length + 1 });
-    const html = await fetchListingPage(context, currentUrl, options);
-    pageUrls.push(currentUrl);
+    const records = await fetchDirectoryPage(requestUrl, options);
+    pageUrls.push(requestUrl);
 
-    const found = extractProfileUrls(html, currentUrl);
-    for (const url of found) {
-      if (profileUrls.has(url)) duplicatesRemoved += 1;
-      else profileUrls.add(url);
+    if (records.length === 0) {
+      terminationReason = 'no-more-results';
+      log.info('Directory API returned an empty page', { offset });
+      break;
     }
-    log.info('Collected profile URLs', {
-      url: currentUrl,
-      found: found.length,
-      totalUnique: profileUrls.size,
-    });
 
-    nextUrl = resolveNextPageUrl(html, currentUrl);
+    for (const record of records) {
+      const key = record?.attributes?.key;
+      const profileUrl = toProfileUrl(record);
+      if (typeof key !== 'string' || key === '' || profileUrl === null) continue;
+
+      if (byKey.has(key)) duplicatesRemoved += 1;
+      else byKey.set(key, profileUrl);
+    }
+
+    log.info('Collected profile URLs', {
+      offset,
+      returned: records.length,
+      totalUnique: byKey.size,
+    });
   }
 
   return {
-    profileUrls: [...profileUrls],
+    // Truncated to the requested count: `maxPages` is a budget, and the first
+    // page returns more than `page[limit]` asks for.
+    profileUrls: [...byKey.values()].slice(0, wanted),
     pageUrls,
     pagesVisited: pageUrls.length,
     duplicatesRemoved,
@@ -402,11 +733,15 @@ export async function fetchProfilePage(context, url, options = {}) {
 
 export const crawler = {
   buildSearchUrl,
+  parseCategoryUrl,
+  buildDirectoryRequestUrl,
+  describeFetchFailure,
+  collectListingUrls,
+  fetchProfilePage,
+  // Retained HTML helpers — no longer on the discovery path, see the header.
   extractProfileUrls,
   resolveNextPageUrl,
   fetchListingPage,
-  collectListingUrls,
-  fetchProfilePage,
 };
 
 export default crawler;

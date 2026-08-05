@@ -9,7 +9,8 @@ import { asyncHandler } from '../utils/asyncHandler.js';
  */
 export const jobController = {
   create: asyncHandler(async (req, res) => {
-    const job = jobService.create(req.body);
+    // Awaits the whole run — the response carries the completed job.
+    const job = await jobService.create(req.body);
     return sendSuccess(res, job, { status: 201 });
   }),
 
