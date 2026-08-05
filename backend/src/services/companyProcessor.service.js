@@ -83,6 +83,10 @@ export function resolveWebsiteUrl(rawWebsite) {
  * @typedef {object} CompanyResult
  * @property {number}      index          1-based position in the batch
  * @property {string}      profileUrl
+ * @property {import('../scrapers/hipages/parser.js').HipagesProfile|null} profile
+ *   Everything the parser read, verbatim. Exposed because the profile is parsed
+ *   here and nowhere else: a consumer that wanted the phone number or the
+ *   reviews would otherwise have to re-fetch and re-parse the same page.
  * @property {string|null} companyName
  * @property {string|null} website        Raw value from the profile
  * @property {string|null} websiteUrl     Navigable form, or null
@@ -117,6 +121,7 @@ async function processCompany(context, profileUrl, index, options = {}) {
   const result = {
     index,
     profileUrl,
+    profile: null,
     companyName: null,
     website: null,
     websiteUrl: null,
@@ -133,6 +138,7 @@ async function processCompany(context, profileUrl, index, options = {}) {
     const html = await fetchProfilePage(context, profileUrl, options);
     const profile = parseProfilePage(html);
 
+    result.profile = profile;
     result.companyName = profile.companyName;
     result.website = profile.website;
     result.websiteUrl = resolveWebsiteUrl(profile.website);
