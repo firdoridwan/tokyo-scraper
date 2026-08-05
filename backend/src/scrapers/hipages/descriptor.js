@@ -33,14 +33,20 @@ const SUPPORTED_INPUTS = [
     helpText: 'Paste a hipages category page URL. Its pagination is walked from here.',
   },
   {
+    // The key stays `limit` — it is still the one ceiling an operator sets, and
+    // every layer below reads it under that name. Only what it counts changed:
+    // emails collected, not companies opened. The label is where that is said.
     name: 'limit',
-    label: 'Max Companies',
+    label: 'Target Emails',
     type: 'number',
     required: false,
     min: 1,
     max: 50,
     defaultValue: 10,
-    helpText: 'The run opens a profile and a website per company, and the request waits for it.',
+    helpText:
+      'Companies are checked until this many valid email addresses have been collected, ' +
+      'or until hipages runs out of companies. Companies with no website, or no email on ' +
+      'their website, are skipped and not exported.',
   },
 ];
 

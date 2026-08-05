@@ -12,15 +12,37 @@
  * @property {string} sourceId
  * @property {Record<string, unknown>} params
  * @property {'queued'|'running'|'completed'|'failed'|'cancelled'} status
- * @property {number} progress          0–100
- * @property {number} resultCount
+ * @property {number} progress          0–100. Completion of the run, which ends
+ *   at either the email target or the end of the source — whichever arrives
+ *   first. A finished job is always 100, including one that exhausted the
+ *   source short of its target.
+ * @property {number} resultCount       Emails collected, which is also the
+ *   number of rows in the export
  * @property {string|null} message      Last human-readable status line
  * @property {string|null} error
  * @property {string} createdAt         ISO-8601
  * @property {string} updatedAt         ISO-8601
  * @property {string|null} startedAt
  * @property {string|null} finishedAt
- * @property {object} [summary]         Pipeline counts, set when a run completes
+ * @property {{
+ *   discovered: number,
+ *   processed: number,
+ *   skipped: number,
+ *   failed: number,
+ *   emailsFound: number
+ * }} [summary]
+ *   Live counters, mirrored from the pipeline. Present from the moment a run
+ *   starts and updated after every company checked, so polling this record
+ *   shows a run in motion.
+ *
+ *   `emailsFound` is the goal of the run and the row count of the export;
+ *   `processed` is companies checked; `skipped` is companies dropped for having
+ *   no website or no email; `discovered` is the size of the pool the source
+ *   offered. `processed = emailsFound + skipped + failed`.
+ *
+ *   The UI surfaces three of these — emails found, companies checked, failed.
+ *   The rest are carried because the exported workbook's Summary sheet is built
+ *   from the same shape and its format is fixed.
  * @property {{
  *   fileName: string,
  *   rowsWritten: number,

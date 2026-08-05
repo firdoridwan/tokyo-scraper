@@ -75,13 +75,13 @@ async function main() {
     }
 
     const { records, summary } = await runPipeline(params, {
-      onDiscovered: ({ profileUrls, discovered }) =>
+      onDiscovered: ({ discovered }) =>
+        process.stdout.write(`\nDiscovered ${discovered} company URL(s) to draw from\n`),
+      onProgress: (snapshot, record) =>
         process.stdout.write(
-          `\nDiscovered ${discovered} company URL(s) — processing ${profileUrls.length}\n`,
-        ),
-      onCompany: (record, index, total) =>
-        process.stdout.write(
-          `  ${index}/${total}  ${record.status.toUpperCase().padEnd(7)} ${record.companyName ?? '—'}\n`,
+          record
+            ? `  ${String(snapshot.emailsFound).padStart(3)}  KEPT     ${record.companyName ?? '—'} <${record.email}>\n`
+            : `       skipped  (${snapshot.processed} checked)\n`,
         ),
     });
 

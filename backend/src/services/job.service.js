@@ -45,15 +45,16 @@ function normalizeParams(source, params = {}) {
 
 export const jobService = {
   /**
-   * Creates a job and runs it.
+   * Creates a job and schedules it.
    *
-   * Awaits the run rather than returning a queued record: with no queue and no
-   * polling, the response IS the completion notice, so the caller receives the
-   * finished job — status, company count and export filename included.
+   * Returns the moment the record exists, still `queued`. Everything that can
+   * reject a request — unknown source, missing or malformed parameters — has
+   * already happened by then, so an accepted job is a job that will actually
+   * run. The work itself is handed to the runner and proceeds in the background.
    *
    * @param {{ sourceId: string, params?: Record<string, unknown> }} payload
    */
-  async create({ sourceId, params }) {
+  create({ sourceId, params }) {
     const source = requireSource(sourceId);
     const normalizedParams = normalizeParams(source, params);
     const now = new Date().toISOString();
@@ -78,7 +79,7 @@ export const jobService = {
     jobRepository.create(job);
     logger.info('Job created', { jobId: job.id, sourceId: job.sourceId });
 
-    return scrapeRunner.run(job, jobRepository);
+    return scrapeRunner.enqueue(job, jobRepository);
   },
 
   /** @param {import('../repositories/types.js').ListQuery} query */

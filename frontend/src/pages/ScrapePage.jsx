@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
-import { CheckCircle2, Download, Globe, Info } from 'lucide-react';
+import { Globe, Info } from 'lucide-react';
 
 import { PageHeader } from '@/components/common/PageHeader.jsx';
 import { SectionCard } from '@/components/common/SectionCard.jsx';
@@ -8,28 +8,33 @@ import { ErrorState } from '@/components/common/ErrorState.jsx';
 import { EmptyState } from '@/components/common/EmptyState.jsx';
 import { SourceCard } from '@/components/scraper/SourceCard.jsx';
 import { ScrapeForm } from '@/components/scraper/ScrapeForm.jsx';
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert.jsx';
+import { JobProgress } from '@/components/scraper/JobProgress.jsx';
+import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert.jsx';
 import { Button } from '@/components/ui/button.jsx';
 import { Skeleton } from '@/components/ui/skeleton.jsx';
 
-import { resultsApi } from '@/api/services/results.api.js';
 import { useSources } from '@/hooks/useSources.js';
-import { useCreateJob } from '@/hooks/useJobs.js';
+import { useCreateJob, useJobPolling } from '@/hooks/useJobs.js';
+import { isTerminalStatus } from '@/lib/constants.js';
 
 /**
- * New Scrape — source selection plus the dynamic parameter form.
+ * New Scrape — source selection, the dynamic parameter form, and the live run.
  *
- * "Start Scraping" posts to `POST /api/v1/jobs`, which runs the scrape and
- * answers when it is finished. There is no progress to show because there is
- * nothing to poll: the response IS the completion, and it carries the company
- * count and the CSV the run wrote.
+ * "Start Scraping" posts to `POST /api/v1/jobs`, which answers immediately with
+ * a queued job and runs the scrape in the background. The page keeps only the
+ * job id; everything shown after that is re-read from
+ * `GET /api/v1/jobs/:id` every two seconds until the job finishes.
+ *
+ * Holding the id rather than the job record is the point: the record is stale
+ * the instant it arrives, so there is exactly one source of truth for the run's
+ * state, and it is the server.
  */
 export function ScrapePage() {
   const navigate = useNavigate();
   const { sources, isLoading, error, refetch } = useSources();
 
   const [selectedSourceId, setSelectedSourceId] = useState(null);
-  const [createdJob, setCreatedJob] = useState(null);
+  const [activeJobId, setActiveJobId] = useState(null);
 
   // Pre-select the first source once the list arrives.
   useEffect(() => {
@@ -39,11 +44,18 @@ export function ScrapePage() {
   const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null;
 
   const createJob = useCreateJob({
-    onSuccess: (job) => setCreatedJob(job),
+    onSuccess: (job) => setActiveJobId(job?.id ?? null),
   });
 
+  const { job, error: pollError } = useJobPolling(activeJobId);
+
+  // Between the POST resolving and the first poll landing there is no job
+  // record yet — the run is already accepted, so the form stays locked.
+  const isJobActive = Boolean(activeJobId) && !isTerminalStatus(job?.status);
+  const isBusy = createJob.isPending || isJobActive;
+
   const handleSubmit = async (payload) => {
-    setCreatedJob(null);
+    setActiveJobId(null);
     await createJob.mutate(payload);
   };
 
@@ -61,59 +73,22 @@ export function ScrapePage() {
 
       {error ? <ErrorState error={error} onRetry={refetch} /> : null}
 
-      {createdJob ? (
-        <Alert variant="success">
-          <CheckCircle2 />
-          <AlertTitle>Scrape complete</AlertTitle>
-          <AlertDescription className="space-y-3">
-            <p>{createdJob.message}</p>
-            <p>
-              Companies processed:{' '}
-              <span className="font-mono text-foreground">{createdJob.resultCount}</span>
-            </p>
-            {createdJob.export?.files?.xlsx ? (
-              <p>
-                Excel file:{' '}
-                <span className="font-mono text-xs text-foreground">
-                  {createdJob.export.files.xlsx}
-                </span>
-              </p>
-            ) : null}
-            {createdJob.export?.fileName ? (
-              <p>
-                CSV file:{' '}
-                <span className="font-mono text-xs text-foreground">
-                  {createdJob.export.fileName}
-                </span>
-              </p>
-            ) : null}
-            {/* Plain links: the browser downloads the files itself. Excel leads;
-                CSV sits under it as the secondary option. */}
-            {createdJob.export?.files?.xlsx ? (
-              <div>
-                <Button asChild size="sm">
-                  <a href={resultsApi.downloadUrl(createdJob.id, 'xlsx')} download>
-                    <Download />
-                    Download Excel
-                  </a>
-                </Button>
-              </div>
-            ) : null}
-            <div className="flex flex-wrap items-center gap-3">
-              {createdJob.export?.fileName ? (
-                <Button asChild size="sm" variant="outline">
-                  <a href={resultsApi.downloadUrl(createdJob.id, 'csv')} download>
-                    <Download />
-                    Download CSV
-                  </a>
-                </Button>
-              ) : null}
-              <Button size="sm" variant="ghost" onClick={() => navigate(`/jobs/${createdJob.id}`)}>
-                Open job
-              </Button>
-            </div>
+      {/* Accepted, but the first poll has not landed yet. */}
+      {activeJobId && !job ? (
+        <Alert variant="info">
+          <AlertTitle>Waiting to start...</AlertTitle>
+          <AlertDescription>
+            <p className="font-mono text-xs">{activeJobId}</p>
           </AlertDescription>
         </Alert>
+      ) : null}
+
+      <JobProgress job={job} error={pollError} />
+
+      {job && isTerminalStatus(job.status) ? (
+        <Button size="sm" variant="ghost" onClick={() => navigate(`/jobs/${job.id}`)}>
+          Open job
+        </Button>
       ) : null}
 
       {createJob.error ? <ErrorState error={createJob.error} /> : null}
@@ -142,7 +117,7 @@ export function ScrapePage() {
                 source={source}
                 isSelected={source.id === selectedSourceId}
                 onSelect={setSelectedSourceId}
-                disabled={createJob.isPending}
+                disabled={isBusy}
               />
             ))}
           </div>
@@ -164,12 +139,12 @@ export function ScrapePage() {
         </Alert>
       ) : null}
 
+      {/* `isSubmitting` locks the form and the Start button. It now covers the
+          whole run, not just the POST: the job is queued or running until it
+          reaches a terminal state, and starting a second scrape on top of it
+          would launch a second browser. */}
       {selectedSource ? (
-        <ScrapeForm
-          source={selectedSource}
-          onSubmit={handleSubmit}
-          isSubmitting={createJob.isPending}
-        />
+        <ScrapeForm source={selectedSource} onSubmit={handleSubmit} isSubmitting={isBusy} />
       ) : null}
 
       {selectedSource ? (

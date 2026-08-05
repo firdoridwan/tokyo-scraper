@@ -24,6 +24,20 @@ export const JOB_STATUS_META = Object.freeze({
   [JOB_STATUS.CANCELLED]: { label: 'Cancelled', tone: 'muted' },
 });
 
+/**
+ * States a job will never leave. Mirrors `TERMINAL_JOB_STATUSES` in the
+ * backend's constants — it is the condition that stops progress polling, so it
+ * has to agree with the server's idea of "finished".
+ */
+export const TERMINAL_JOB_STATUSES = Object.freeze([
+  JOB_STATUS.COMPLETED,
+  JOB_STATUS.FAILED,
+  JOB_STATUS.CANCELLED,
+]);
+
+/** @param {string} status */
+export const isTerminalStatus = (status) => TERMINAL_JOB_STATUSES.includes(status);
+
 export const JOB_STATUS_OPTIONS = Object.entries(JOB_STATUS_META).map(([value, meta]) => ({
   value,
   label: meta.label,

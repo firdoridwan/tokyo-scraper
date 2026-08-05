@@ -110,13 +110,19 @@ export function resolveWebsiteUrl(rawWebsite) {
 /**
  * Processes one company: profile → parse → conditional website capture.
  *
+ * Exported as well as used by `processCompanies()` below, because a caller that
+ * must decide whether to continue *after each company* — the pipeline, which
+ * stops once it has collected enough emails — cannot hand its loop to a
+ * function that runs to the end of the list. Both entry points run identical
+ * per-company work; only who owns the loop differs.
+ *
  * @param {object} context Playwright page for hipages (injected)
  * @param {string} profileUrl
  * @param {number} index 1-based
  * @param {{ signal?: AbortSignal }} [options]
  * @returns {Promise<CompanyResult>}
  */
-async function processCompany(context, profileUrl, index, options = {}) {
+export async function processCompany(context, profileUrl, index, options = {}) {
   /** @type {CompanyResult} */
   const result = {
     index,
@@ -215,6 +221,6 @@ export async function processCompanies(context, profileUrls, options = {}) {
   return { results, summary };
 }
 
-export const companyProcessor = { processCompanies, resolveWebsiteUrl };
+export const companyProcessor = { processCompany, processCompanies, resolveWebsiteUrl };
 
 export default companyProcessor;
