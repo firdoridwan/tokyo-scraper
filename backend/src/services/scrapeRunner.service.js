@@ -39,16 +39,31 @@
  * take as long as it takes.
  *
  * There is no queue, no broker and no worker process — just a task the event
- * loop picks up after the response has been flushed. See "why this is safe" in
- * `runInBackground()`.
+ * loop picks up after the response has been flushed.
  *
- * Not implemented here, deliberately: concurrency (`p-limit`), retries, and
- * persisting individual rows through `resultRepository` — the CSV and the
+ * Who may write a terminal state
+ * ------------------------------
+ * Exactly one writer, once, per ending:
+ *
+ *   completed / failed   this module, at the end of `run()`
+ *   cancelled            `jobService.cancel()`, at the moment it is requested
+ *
+ * A run that discovers it was cancelled writes NOTHING. It used to write the
+ * final `cancelled` record itself, which made two writers for one ending and
+ * meant a terminal record kept changing after the API had already reported it.
+ * The repository now refuses writes to a finished job, so the rule is enforced
+ * rather than merely intended — see `MemoryJobRepository.update()`.
+ *
+ * Not implemented here, deliberately: concurrency limits (`p-limit`), retries,
+ * and persisting individual rows through `resultRepository` — the CSV and the
  * workbook are this milestone's output, and none of those were asked for.
  */
+import fs from 'node:fs';
+import path from 'node:path';
 import { JOB_STATUS, TERMINAL_JOB_STATUSES } from '../config/constants.js';
+import { config } from '../config/env.js';
 import { runPipeline, toScrapingMode, SCRAPING_MODE } from './scrapingPipeline.service.js';
-import { exportCompaniesToCsv } from './csvExporter.service.js';
+import { exportCompaniesToCsv, buildExportFileName } from './csvExporter.service.js';
 import { exportCompaniesToXlsx } from './excelExporter.service.js';
 import { ApiError } from '../utils/ApiError.js';
 import { logger } from '../utils/logger.js';
@@ -57,12 +72,36 @@ import { logger } from '../utils/logger.js';
  * Cancellation handles for in-flight runs, keyed by job id.
  *
  * A background run has no request to abandon, so this map is the only way to
- * reach one after it has started. Entries are removed in a `finally`, so a
- * crashed run cannot leave a handle behind.
+ * reach one after it has started. The entry is created in `enqueue()` — BEFORE
+ * the run is scheduled, not inside it — because the gap between "accepted" and
+ * "started" is a real window a user can cancel in. Registering on start left
+ * that window unguarded: `cancel()` found nothing to abort, and the run then
+ * began on a job the API had already reported as cancelled.
+ *
+ * Entries are removed in `run()`'s `finally`, so a crashed run cannot leave a
+ * handle behind, and `cancel()` deliberately does not remove them — a handle is
+ * only stale once the run it belongs to has actually stopped.
  *
  * @type {Map<string, { abortController: AbortController }>}
  */
 const activeRuns = new Map();
+
+/**
+ * Export filenames already handed out in this process.
+ *
+ * `buildExportFileName()` names a file after the second it was written in, which
+ * is unique for one run at a time and NOT unique for several. Two jobs finishing
+ * inside the same second produced the same two names, and the second run
+ * silently overwrote the first run's files while both job records went on
+ * pointing at them.
+ *
+ * The set remembers names beyond the life of the files they belong to, which is
+ * the point: a name is retired for the process, so a reservation cannot be
+ * reissued even if the file it named is deleted mid-run.
+ *
+ * @type {Set<string>}
+ */
+const reservedExportNames = new Set();
 
 /** Counters the job carries while it runs. Same shape as the pipeline summary. */
 const EMPTY_SUMMARY = Object.freeze({
@@ -116,10 +155,11 @@ export function toProgress(summary) {
  * under different modes, and an operator who reads only the second number needs
  * to be told which one they asked for.
  *
- * It takes no `stopReason`. A cancelled run never reaches here — `run()` hands
- * that ending to `finishCancelled()` — so the only reason left is the source
- * running out, and a parameter that can hold exactly one value is a parameter
- * that will eventually be passed the wrong thing.
+ * It takes no `stopReason`. A cancelled run never reaches here — it returns
+ * without writing, leaving the record `jobService.cancel()` already wrote — so
+ * the only reason left is the source running out, and a parameter that can hold
+ * exactly one value is a parameter that will eventually be passed the wrong
+ * thing.
  *
  * @param {typeof EMPTY_SUMMARY} summary
  * @param {import('./scrapingPipeline.service.js').ScrapingMode} mode
@@ -161,49 +201,66 @@ function requireCategoryUrl(value) {
   try {
     url = new URL(String(value));
   } catch {
-    throw ApiError.validation(`"${value}" is not a valid URL.`, { field: 'categoryUrl' });
+    throw ApiError.validation(
+      `"${value}" is not a valid URL. Paste a full hipages category address, ` +
+        'for example https://hipages.com.au/find/electricians/nsw/sydney',
+      { field: 'categoryUrl' },
+    );
   }
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-    throw ApiError.validation(`Category URL must be http or https, not "${url.protocol}".`, {
-      field: 'categoryUrl',
-    });
+    throw ApiError.validation(
+      `Category URL must start with http:// or https://, not "${url.protocol}".`,
+      { field: 'categoryUrl' },
+    );
   }
 
   return url.href;
 }
 
 /**
- * Records a cancelled run's final state.
+ * Claims a pair of export filenames that no other run can be handed.
  *
- * `jobService.cancel()` has already written `cancelled`; this preserves that
- * status while attaching the counters reached before the stop, so a cancelled
- * job still says how far it got. No export is written — a partial file
- * indistinguishable from a complete one is worse than no file.
+ * Both formats share one base name so a run's two files sit together in the
+ * folder — that is unchanged. What is new is that the base is checked against
+ * the names already issued in this process AND against the exports directory
+ * itself, and suffixed `_2`, `_3` … until it collides with neither.
  *
- * @param {import('../repositories/types.js').Job} job
- * @param {import('../repositories/types.js').JobRepository} jobRepository
- * @param {typeof EMPTY_SUMMARY} summary
+ * The disk check is what covers a restart: the in-memory set is empty again,
+ * but yesterday's file is still there and must not be overwritten by a run that
+ * happens to finish at the same second of the same day.
+ *
+ * The common case — no concurrent run, no same-second collision — returns
+ * exactly the name the old code produced, so a normal run's files are named as
+ * they always were.
+ *
+ * Exported for the same reason `toProgress()` and `completionMessage()` are:
+ * it is a pure-enough decision with a rule worth pinning down, and the only
+ * other way to observe a collision is to get two real runs to finish in the
+ * same second on purpose.
+ *
+ * @param {Date} now
+ * @returns {{ csv: string, xlsx: string }}
  */
-function finishCancelled(job, jobRepository, summary) {
-  logger.warn('Job cancelled mid-run', {
-    jobId: job.id,
-    checked: summary.processed,
-    exported: summary.exported,
-  });
+export function reserveExportNames(now) {
+  const dir = config.paths.exports;
 
-  return jobRepository.update(job.id, {
-    status: JOB_STATUS.CANCELLED,
-    message:
-      `Cancelled after ${quantity(summary.processed, 'company', 'companies')} checked, ` +
-      `${quantity(summary.emailsFound, 'email', 'emails')} found.`,
-    // Nothing was written, so nothing was exported. The counter reports the
-    // companies that WOULD have qualified, which is the honest number to show
-    // beside a run that stopped before its files existed.
-    resultCount: summary.exported,
-    summary,
-    finishedAt: new Date().toISOString(),
-  });
+  const taken = (name) => reservedExportNames.has(name) || fs.existsSync(path.join(dir, name));
+
+  for (let attempt = 1; ; attempt += 1) {
+    const suffix = attempt === 1 ? '' : `_${attempt}`;
+    // Built from the same stamp every time; only the discriminator moves, so
+    // the two formats always agree on the base name.
+    const csv = buildExportFileName(now, 'csv').replace(/\.csv$/, `${suffix}.csv`);
+    const xlsx = buildExportFileName(now, 'xlsx').replace(/\.xlsx$/, `${suffix}.xlsx`);
+
+    if (!taken(csv) && !taken(xlsx)) {
+      reservedExportNames.add(csv);
+      reservedExportNames.add(xlsx);
+      if (attempt > 1) logger.info('Export name collided — using a suffixed name', { csv, xlsx });
+      return { csv, xlsx };
+    }
+  }
 }
 
 export const scrapeRunner = {
@@ -227,6 +284,13 @@ export const scrapeRunner = {
    * @returns {import('../repositories/types.js').Job} The queued job
    */
   enqueue(job, jobRepository) {
+    // Registered NOW, synchronously, so the job is cancellable from the instant
+    // the API reports it accepted. Creating it inside the scheduled callback
+    // left a window — short, but reliably hit by a client that cancels straight
+    // after starting — where `cancel()` had nothing to abort and the run went on
+    // to scrape a job that was already `cancelled`.
+    activeRuns.set(job.id, { abortController: new AbortController() });
+
     setImmediate(() => {
       // `run()` records its own failures on the job; this catch is the guard
       // against a bug INSIDE that recording. Nothing awaits this promise, so an
@@ -236,6 +300,10 @@ export const scrapeRunner = {
           jobId: job.id,
           message: error?.message,
         });
+        // The handle is removed in `run()`'s own `finally`; this is the path
+        // where that `finally` itself could not run. Leaving the entry would
+        // make a dead job look cancellable forever.
+        activeRuns.delete(job.id);
       });
     });
 
@@ -258,8 +326,43 @@ export const scrapeRunner = {
    */
   async run(job, jobRepository) {
     const params = job.params ?? {};
-    const controller = new AbortController();
-    activeRuns.set(job.id, { abortController: controller });
+
+    // `enqueue()` registered the handle; a direct caller (a test, a CLI) may not
+    // have, so one is created on demand rather than assumed.
+    const controller =
+      activeRuns.get(job.id)?.abortController ??
+      activeRuns.set(job.id, { abortController: new AbortController() }).get(job.id)
+        .abortController;
+
+    /**
+     * The gate between "accepted" and "started".
+     *
+     * Between `enqueue()` and this callback the job can have been cancelled or
+     * deleted, and neither leaves anything for the run to do. Returning here —
+     * before the status is written, before a browser is launched — is what makes
+     * "a cancelled job never becomes completed" true by construction rather than
+     * by the terminal guard catching it several minutes later.
+     *
+     * The record is re-read rather than trusted from the closure: `job` is the
+     * snapshot taken when the job was created, and everything interesting has
+     * happened to it since.
+     */
+    const current = jobRepository.findById(job.id);
+
+    if (!current) {
+      logger.info('Job disappeared before its run started — nothing to do', { jobId: job.id });
+      activeRuns.delete(job.id);
+      return null;
+    }
+
+    if (TERMINAL_JOB_STATUSES.includes(current.status) || controller.signal.aborted) {
+      logger.info('Job was already finished before its run started — not running', {
+        jobId: job.id,
+        status: current.status,
+      });
+      activeRuns.delete(job.id);
+      return current;
+    }
 
     logger.info('Job started', { jobId: job.id, sourceId: job.sourceId, params });
 
@@ -343,17 +446,29 @@ export const scrapeRunner = {
         },
       );
 
-      // `summary` and `live` now agree — the pipeline counts as it goes and
-      // hands back the same object it has been publishing — so either would do
-      // here. `summary` is used because it is the run's own final word.
-      if (controller.signal.aborted) return finishCancelled(job, jobRepository, summary);
+      // A cancelled run writes nothing at all. `jobService.cancel()` already
+      // wrote the terminal record — with the counters this run had published up
+      // to that moment — and the repository would refuse this write anyway.
+      // Returning before the exporters is what makes "no export is generated for
+      // a cancelled job" a property of the code rather than of the guard.
+      if (controller.signal.aborted) {
+        logger.warn('Run stopped by cancellation — no export written', {
+          jobId: job.id,
+          checked: summary.processed,
+        });
+        return jobRepository.findById(job.id);
+      }
 
       // Both formats come from the same records and share one timestamp, so a
       // run's two files sit side by side in the exports folder under one name.
+      // The names are reserved rather than derived, so two runs finishing in the
+      // same second cannot be handed the same pair.
       const stamp = new Date();
-      const csv = await exportCompaniesToCsv(records, { now: stamp });
+      const names = reserveExportNames(stamp);
+      const csv = await exportCompaniesToCsv(records, { now: stamp, fileName: names.csv });
       const xlsx = await exportCompaniesToXlsx(records, {
         now: stamp,
+        fileName: names.xlsx,
         summary,
         categoryUrl: params.categoryUrl,
       });
@@ -394,41 +509,60 @@ export const scrapeRunner = {
         },
       });
     } catch (error) {
+      // A cancelled run reaches here too, because aborting mid-company surfaces
+      // as a thrown error. It is not a failure and writes nothing — same reason
+      // as the successful-but-cancelled path above.
       if (controller.signal.aborted) {
-        return finishCancelled(job, jobRepository, { ...live });
+        logger.warn('Run threw while cancelling — treated as cancelled, not failed', {
+          jobId: job.id,
+          message: error?.message,
+        });
+        return jobRepository.findById(job.id);
       }
 
-      logger.error('Job failed', { jobId: job.id, message: error.message });
+      logger.error('Job failed', { jobId: job.id, message: error?.message });
 
+      // `error.message` is not guaranteed to exist — a rejection can carry a
+      // string, or nothing at all. A job that failed must still say why, and
+      // `undefined` in the error field reads as "no error".
       return jobRepository.update(job.id, {
         status: JOB_STATUS.FAILED,
         message: 'Run failed.',
-        error: error.message,
+        error: error?.message ?? String(error ?? 'Unknown error'),
         summary: { ...live },
         finishedAt: new Date().toISOString(),
       });
     } finally {
+      // The only place a handle is retired. Runs on every path out — success,
+      // failure, cancellation, and a throw from any of the writes above.
       activeRuns.delete(job.id);
     }
   },
 
 
   /**
-   * Requests cancellation of a running job.
+   * Signals a scheduled or running job to stop.
    *
-   * Now that runs are detached, this is real: the handle registered in
-   * `activeRuns` aborts the signal the pipeline is watching, which stops it
-   * between companies. `jobService.cancel()` marks the record regardless, so a
-   * job that has not started yet is still cancelled correctly.
+   * The handle exists from `enqueue()` onwards, so this reaches a job that has
+   * not started yet as surely as one halfway through a category: the run checks
+   * the same signal before it begins and between every company.
+   *
+   * It does NOT remove the entry. The handle describes a run that is still
+   * winding down — finishing the company it is on, closing its browser — and
+   * `run()`'s `finally` is the one place that retires it. Removing it here made
+   * `activeRuns` claim the run had stopped while it was still holding a browser
+   * open, and made a second cancel a silent no-op.
+   *
+   * Idempotent: aborting an already-aborted controller does nothing, so a user
+   * clicking Cancel twice is not a special case.
    *
    * @param {string} jobId
-   * @returns {boolean} whether an in-flight run was signalled
+   * @returns {boolean} whether a run was there to signal
    */
   cancel(jobId) {
     const run = activeRuns.get(jobId);
     if (!run) return false;
     run.abortController.abort();
-    activeRuns.delete(jobId);
     return true;
   },
 

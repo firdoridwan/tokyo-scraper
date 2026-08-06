@@ -327,6 +327,78 @@ export function summarise(records, discovered, mode = SCRAPING_MODE.ALL) {
 }
 
 /**
+ * Shuts a run's browser down without ever throwing.
+ *
+ * Cleanup runs in a `finally`, and a `finally` that throws REPLACES whatever the
+ * body was doing — including a successful return. `browser.close()` rejecting
+ * because the browser had already crashed therefore turned a run that had
+ * collected every company into a failed job, discarding records that were
+ * complete and in hand. The close is the last thing that matters least; it must
+ * never be the thing that decides the outcome.
+ *
+ * Each handle is closed separately for the same reason, so one failing does not
+ * skip the others. Failures are logged, not raised: there is no caller who could
+ * do anything about a browser that will not close.
+ *
+ * @param {{ page?: object|null, context?: object|null, browser?: object|null }} handles
+ */
+async function closeQuietly({ page, context, browser }) {
+  // Innermost first — a page belongs to a context, which belongs to a browser.
+  let closedAnything = false;
+
+  for (const [label, handle] of [
+    ['page', page],
+    ['context', context],
+    ['browser', browser],
+  ]) {
+    if (!handle) continue;
+    closedAnything = true;
+    try {
+      await handle.close();
+    } catch (error) {
+      log.warn(`Failed to close ${label} — continuing cleanup`, { message: error?.message });
+    }
+  }
+
+  // A run that discovered nothing never opened one, and saying it closed a
+  // browser would be a log line describing something that did not happen.
+  if (closedAnything) log.info('hipages browser closed');
+}
+
+/**
+ * Waits, unless the run is cancelled first.
+ *
+ * The politeness delay used to be a bare `setTimeout` promise, which had two
+ * consequences on cancellation: the run sat out the full delay before noticing,
+ * and the timer stayed pending afterwards. Neither is large — the delay is a
+ * second and a half — but a timer nobody can stop is precisely the kind of thing
+ * this sweep is for, and the wait is the most likely moment for a cancel to land
+ * because it is the only moment the loop is idle.
+ *
+ * Both the timer and the abort listener are torn down on every exit, so nothing
+ * outlives the call.
+ *
+ * @param {number} ms
+ * @param {AbortSignal} [signal]
+ * @returns {Promise<void>} Resolves on timeout OR on abort — never rejects, so
+ *   the caller decides what an abort means rather than catching for it.
+ */
+function delay(ms, signal) {
+  if (ms <= 0 || signal?.aborted) return Promise.resolve();
+
+  return new Promise((resolve) => {
+    const done = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', done);
+      resolve();
+    };
+
+    const timer = setTimeout(done, ms);
+    signal?.addEventListener('abort', done, { once: true });
+  });
+}
+
+/**
  * Runs the email extractor against a homepage the processor already captured.
  *
  * The capture is read from disk rather than re-visited — the whole reason the
@@ -416,25 +488,42 @@ export async function runPipeline(params = {}, options = {}) {
    */
   let stopReason = 'source-exhausted';
 
-  const browser = await chromium.launch({ headless: config.scraper.headless });
+  /**
+   * Held outside the `try` so cleanup can reach them, and null until there is
+   * something to open.
+   *
+   * `browser.close()` disposes contexts and pages on its own, so closing these
+   * is belt to its braces — it matters when the browser is the thing that has
+   * gone wrong, which is the case where the implicit disposal is exactly what
+   * cannot be relied on.
+   *
+   * @type {import('playwright').Browser|null}
+   */
+  let browser = null;
+  /** @type {import('playwright').BrowserContext|null} */
+  let context = null;
+  /** @type {import('playwright').Page|null} */
+  let page = null;
 
   try {
-    const context = await browser.newContext({
-      viewport: VIEWPORT,
-      userAgent: config.scraper.userAgent,
-    });
-    const page = await context.newPage();
-    page.setDefaultNavigationTimeout(config.scraper.navigationTimeoutMs);
-
     let profileUrls = params.profileUrls ?? [];
 
     if (profileUrls.length === 0) {
+      // Discovery needs no browser. `collectListingUrls()` reads the directory's
+      // JSON API directly — it still takes a context argument for interface
+      // compatibility and ignores it — so the browser is launched AFTER this
+      // rather than before, and sits idle through none of it.
+      //
+      // That also means a category that turns out to be empty, or a URL the
+      // crawler rejects, never launches one at all: a run that has nothing to
+      // open now costs no browser instead of a full launch and shutdown.
+      //
       // No `maxPages`, in either mode. Both are asking for the whole source, so
       // the collector keeps requesting the directory's "View More" pages until
       // it is empty or the API's own offset ceiling is reached, and reports
       // which one ended it.
       const collected = await collectListingUrls(
-        page,
+        null,
         {
           listingUrl: params.categoryUrl,
           category: params.category,
@@ -451,6 +540,16 @@ export async function runPipeline(params = {}, options = {}) {
       });
     }
 
+    if (profileUrls.length > 0) {
+      browser = await chromium.launch({ headless: config.scraper.headless });
+      context = await browser.newContext({
+        viewport: VIEWPORT,
+        userAgent: config.scraper.userAgent,
+      });
+      page = await context.newPage();
+      page.setDefaultNavigationTimeout(config.scraper.navigationTimeoutMs);
+    }
+
     summary.discovered = profileUrls.length;
     // Nothing is sliced off either end: every discovered company is opened, and
     // the mode has no say in that.
@@ -463,14 +562,33 @@ export async function runPipeline(params = {}, options = {}) {
         break;
       }
 
-      // Politeness delay between companies — never before the first one.
-      if (position > 0 && delayMs > 0) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      // Politeness delay between companies — never before the first one, and
+      // interrupted by a cancellation rather than waited out.
+      if (position > 0) await delay(delayMs, options.signal);
+
+      // Re-checked AFTER the wait. The loop-top check was the only one, so a
+      // cancel arriving during the delay — the likeliest moment for one, since
+      // it is the only moment the loop is idle — still opened one more company.
+      if (options.signal?.aborted) {
+        stopReason = 'cancelled';
+        break;
       }
 
       const result = await processCompany(page, profileUrl, position + 1, {
         signal: options.signal,
       });
+
+      // A cancel that lands mid-company leaves a result that is an interrupted
+      // attempt, not an outcome: `processCompany()` catches the abort and
+      // reports it as an error, which would otherwise be counted as a failure
+      // and inflate a cancelled run's `failed` tally with work nobody asked to
+      // finish. Dropping it uncounted is what makes `processed` mean "companies
+      // this run actually decided about".
+      if (options.signal?.aborted) {
+        stopReason = 'cancelled';
+        break;
+      }
+
       summary.processed += 1;
 
       // A company that failed has no homepage capture to read, so there is
@@ -506,8 +624,7 @@ export async function runPipeline(params = {}, options = {}) {
     // loop by its normal exit and report the wrong ending.
     if (options.signal?.aborted) stopReason = 'cancelled';
   } finally {
-    await browser.close();
-    log.info('hipages browser closed');
+    await closeQuietly({ page, context, browser });
   }
 
   log.info('Pipeline finished', { mode, stopReason, ...summary });

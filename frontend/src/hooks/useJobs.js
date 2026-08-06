@@ -109,6 +109,68 @@ export function useJobPolling(jobId) {
   return { job, error, isPolling };
 }
 
+/**
+ * Finds the run that is still going, once, when the page loads.
+ *
+ * The page holds its active job as an id in React state, which a refresh
+ * throws away — while the backend goes on scraping, because the run was never
+ * tied to the browser in the first place. Without this, reloading during a run
+ * showed an idle form and no way back to the job that was still working.
+ *
+ * It asks the API rather than remembering anything: no localStorage, no
+ * persistence, no history. The server already knows which jobs are unfinished,
+ * and asking it is the only answer that cannot go stale or survive a restart it
+ * should not have survived.
+ *
+ * One request, on mount, and never again — polling the recovered job is
+ * `useJobPolling`'s job. `enabled` is what stops it from fighting a job the user
+ * has just started in this session.
+ *
+ * @param {boolean} enabled
+ * @returns {{ jobId: string|null, isResolved: boolean }} `isResolved` turns true
+ *   once the answer is known, including when the answer is "nothing running".
+ */
+export function useActiveJobRecovery(enabled) {
+  const [jobId, setJobId] = useState(null);
+  const [isResolved, setIsResolved] = useState(false);
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+
+    let stopped = false;
+    const controller = new AbortController();
+
+    (async () => {
+      try {
+        // The list is newest-first, so the first unfinished job is the current
+        // one. A page of 25 is far more than the handful a single operator can
+        // have in flight.
+        const { data } = await jobsApi.list(
+          { page: 1, pageSize: 25 },
+          { signal: controller.signal },
+        );
+        if (stopped) return;
+
+        const running = (data ?? []).find((job) => !isTerminalStatus(job?.status));
+        if (running) setJobId(running.id);
+      } catch {
+        // A failed recovery is not a failed page. The form still works; the user
+        // can reach the run through Jobs. Reporting it here would put an error
+        // banner on a page that is fine.
+      } finally {
+        if (!stopped) setIsResolved(true);
+      }
+    })();
+
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [enabled]);
+
+  return { jobId, isResolved };
+}
+
 /** Creates a job — this is what "Start Scraping" calls. */
 export function useCreateJob(callbacks) {
   const mutationFn = useCallback((payload) => jobsApi.create(payload), []);

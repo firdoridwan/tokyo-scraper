@@ -424,9 +424,13 @@ async function fetchDirectoryPage(url, options = {}) {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('timeout')), API_TIMEOUT_MS);
-  options.signal?.addEventListener('abort', () => controller.abort(options.signal.reason), {
-    once: true,
-  });
+
+  // Named so it can be removed again. `{ once: true }` only retires a listener
+  // that actually fires, and the overwhelmingly common case is that it does not
+  // — leaving one listener per directory page attached to the run's signal for
+  // as long as the run lives. Ten pages, ten listeners, every run.
+  const forwardAbort = () => controller.abort(options.signal.reason);
+  options.signal?.addEventListener('abort', forwardAbort, { once: true });
 
   let response;
   try {
@@ -467,6 +471,7 @@ async function fetchDirectoryPage(url, options = {}) {
     });
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener('abort', forwardAbort);
   }
 
   const body = await response.text();

@@ -12,12 +12,18 @@
  * @property {string} sourceId
  * @property {Record<string, unknown>} params
  * @property {'queued'|'running'|'completed'|'failed'|'cancelled'} status
- * @property {number} progress          0–100. Completion of the run, which ends
- *   at either the email target or the end of the source — whichever arrives
- *   first. A finished job is always 100, including one that exhausted the
- *   source short of its target.
- * @property {number} resultCount       Emails collected, which is also the
- *   number of rows in the export
+ *   `completed`, `failed` and `cancelled` are TERMINAL: a job in one of them can
+ *   never be written to again, and the store enforces that rather than trusting
+ *   its callers — see `MemoryJobRepository.update()`. Any driver replacing it
+ *   owes the same guarantee, because the writers are concurrent: a background
+ *   run publishes progress while an HTTP request may finish the same job between
+ *   two of those writes.
+ * @property {number} progress          0–100. Companies processed over companies
+ *   discovered — the work done over the work there is. Never decreases, and a
+ *   finished job is always 100.
+ * @property {number} resultCount       Rows in the export, i.e. the companies
+ *   the run's scraping mode kept. `all` keeps every company that did not error;
+ *   `with-email` keeps only those with an address.
  * @property {string|null} message      Last human-readable status line
  * @property {string|null} error
  * @property {string} createdAt         ISO-8601
@@ -27,22 +33,23 @@
  * @property {{
  *   discovered: number,
  *   processed: number,
+ *   exported: number,
  *   skipped: number,
  *   failed: number,
  *   emailsFound: number
  * }} [summary]
  *   Live counters, mirrored from the pipeline. Present from the moment a run
  *   starts and updated after every company checked, so polling this record
- *   shows a run in motion.
+ *   shows a run in motion. Every counter only ever rises.
  *
- *   `emailsFound` is the goal of the run and the row count of the export;
- *   `processed` is companies checked; `skipped` is companies dropped for having
- *   no website or no email; `discovered` is the size of the pool the source
- *   offered. `processed = emailsFound + skipped + failed`.
+ *   `discovered` is the size of the pool the source offered and `processed` is
+ *   how many of them the run has decided about; both modes open all of them.
+ *   `skipped` is companies that yielded no email, `failed` is companies that
+ *   errored, and `processed = emailsFound + skipped + failed`.
  *
- *   The UI surfaces three of these — emails found, companies checked, failed.
- *   The rest are carried because the exported workbook's Summary sheet is built
- *   from the same shape and its format is fixed.
+ *   `exported` cuts across those buckets rather than joining them — it is the
+ *   count the scraping mode decides, and the only figure that differs between
+ *   the two modes. It is also the export's row count.
  * @property {{
  *   fileName: string,
  *   rowsWritten: number,

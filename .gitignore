@@ -11,13 +11,28 @@ data/*.sqlite-journal
 data/*.sqlite-wal
 data/*.sqlite-shm
 
+# Homepage captures written by the website visitor — one directory per company
+# visited, so a single run adds dozens.
 data/websites/*
 !data/websites/.gitkeep
+
+# Page dumps written by `scrapers/hipages/inspector.js`. Same kind of artifact
+# as the captures above: a snapshot of somebody else's page, taken to be looked
+# at once. Four of them were committed before this rule existed; they are still
+# tracked, and `git rm -r --cached data/inspections` retires them.
+data/inspections/*
+!data/inspections/.gitkeep
 
 data/exports/*
 data/logs/*
 !data/exports/.gitkeep
 !data/logs/.gitkeep
+
+# Scratch files that tend to appear beside a run.
+*.tmp
+*.temp
+*.bak
+*.orig
 
 # Environment
 .env

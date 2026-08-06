@@ -9,15 +9,3 @@ export function useSources() {
 
   return { ...query, sources: query.data ?? [] };
 }
-
-/** One source descriptor — drives the dynamic scrape form. */
-export function useSource(sourceId) {
-  const queryFn = useCallback(
-    (options) => sourcesApi.getById(sourceId, options),
-    [sourceId],
-  );
-
-  const query = useApiQuery(queryFn, [sourceId], { enabled: Boolean(sourceId) });
-
-  return { ...query, source: query.data ?? null };
-}

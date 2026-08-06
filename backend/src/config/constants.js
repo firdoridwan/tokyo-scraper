@@ -46,9 +46,3 @@ export const PAGINATION = Object.freeze({
   DEFAULT_PAGE_SIZE: 25,
   MAX_PAGE_SIZE: 200,
 });
-
-export const LIMITS = Object.freeze({
-  MIN_PAGES: 1,
-  MAX_PAGES: 100,
-  MAX_QUERY_LENGTH: 120,
-});

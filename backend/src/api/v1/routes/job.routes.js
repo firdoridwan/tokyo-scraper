@@ -9,8 +9,10 @@ const router = Router();
 
 /**
  * POST /api/v1/jobs — the endpoint behind "Start Scraping".
- * Creates and queues a job. The engine is not implemented yet, so the job is
- * parked in `queued` with an explanatory message.
+ *
+ * Validates, creates and schedules a job, then answers immediately with it in
+ * `queued`. The scrape itself runs in the background; callers follow it through
+ * `GET /api/v1/jobs/:id` rather than by waiting on this response.
  */
 router.post('/', validate({ body: createJobSchema }), jobController.create);
 

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { systemApi } from '@/api/services/system.api.js';
 import { useApiQuery } from './useApiQuery.js';
 
@@ -31,23 +31,4 @@ export function useStats() {
   const queryFn = useCallback((options) => systemApi.stats(options), []);
   const query = useApiQuery(queryFn, []);
   return { ...query, stats: query.data ?? null };
-}
-
-/** Small helper for transient inline confirmations ("Job queued"). */
-export function useTransientMessage(timeoutMs = 6000) {
-  const [message, setMessage] = useState(null);
-  const timerRef = useRef(null);
-
-  const show = useCallback(
-    (next) => {
-      clearTimeout(timerRef.current);
-      setMessage(next);
-      timerRef.current = setTimeout(() => setMessage(null), timeoutMs);
-    },
-    [timeoutMs],
-  );
-
-  useEffect(() => () => clearTimeout(timerRef.current), []);
-
-  return { message, show, clear: () => setMessage(null) };
 }

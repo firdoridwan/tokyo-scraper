@@ -11,7 +11,6 @@ import { randomUUID } from 'node:crypto';
 export const createId = (prefix) => `${prefix}_${randomUUID().replace(/-/g, '').slice(0, 20)}`;
 
 export const createJobId = () => createId('job');
-export const createResultId = () => createId('res');
 export const createRequestId = () => createId('req');
 
 export default createId;

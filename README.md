@@ -6,10 +6,15 @@ from directory websites.
 First supported source: [hipages.com.au](https://hipages.com.au). The architecture is
 source-agnostic — additional directories plug in without touching the API or UI.
 
-> **Current milestone: application skeleton.**
-> The full stack runs end to end — routing, API, validation, job queue, persistence
-> seam, and UI. The Playwright scraping engine, SQLite driver, and CSV exporter are
-> deliberately not built yet. Every place they attach is marked and documented.
+> **Status: working end to end.**
+> Paste a hipages category URL, pick a scraping mode, and the run walks the whole
+> category, opens every business profile, visits the websites that are listed,
+> extracts an email where one is published, and writes a CSV and an Excel
+> workbook you can download. Runs happen in the background; the UI follows them
+> by polling.
+>
+> Jobs are held in memory, so a backend restart clears the job list. The files it
+> has already written stay on disk under `data/exports/`.
 
 ---
 
@@ -36,8 +41,11 @@ Open <http://localhost:5173>.
 ## Stack
 
 **Frontend** — React 18, Vite, TailwindCSS, shadcn/ui, Lucide, React Router
-**Backend** — Node.js, Express, Zod (Playwright + better-sqlite3 installed, not yet wired)
+**Backend** — Node.js, Express, Zod, Playwright (scraping), ExcelJS + csv-writer (exports)
 **Transport** — REST, versioned at `/api/v1`
+
+`better-sqlite3` is installed but unused: the persistence seam exists and the
+SQLite driver behind it has not been written. The job store is in memory.
 
 ---
 
@@ -73,7 +81,7 @@ Base: `http://localhost:4000/api/v1`
 | `DELETE` | `/jobs/:id`          | Delete a job and its records               |
 | `GET`    | `/jobs/:id/results`  | Records for one job                        |
 | `GET`    | `/results`           | Records across all jobs                    |
-| `GET`    | `/results/export`    | Reserved — returns `501` until built       |
+| `GET`    | `/results/export`    | Download a run's file: `?jobId=…&format=csv\|xlsx` |
 
 Every response uses one envelope:
 
@@ -87,33 +95,53 @@ Every response uses one envelope:
 
 ---
 
-## What "not implemented yet" means
+## How a run works
 
-These are wired but intentionally inert, and the app tells you so at runtime:
+`POST /jobs` validates the input, normalizes it against the source descriptor,
+records the job, and answers immediately with it `queued`. The scrape then runs
+in the background and writes its progress onto the job record, which the UI
+polls every two seconds.
 
-| Feature          | Status | Where it attaches                                     |
-| ---------------- | ------ | ----------------------------------------------------- |
-| Playwright engine| Stub   | `backend/src/services/scrapeRunner.service.js`         |
-| hipages scraper  | Absent | `backend/src/scrapers/hipages/hipages.scraper.js`      |
-| SQLite driver    | Absent | `backend/src/repositories/sqlite/`                     |
-| CSV export       | Stub   | `backend/src/services/result.service.js` → `export()`  |
+```
+category URL
+  → crawler        walks the directory's "View More" pages until exhausted
+  → processor      opens each profile, parses it, visits the website if listed
+  → extractor      reads one email address off the captured homepage
+  → exporters      one CSV + one XLSX under data/exports/
+```
 
-`POST /jobs` is real: it validates input, normalizes parameters against the source
-descriptor, persists the job, and queues it. The job stays `queued` because no engine
-consumes the queue yet — no fake progress, no fabricated rows.
+Every discovered company is processed in both scraping modes. The mode decides
+only which of them reach the files:
+
+| Scraping mode               | Exports                                        |
+| --------------------------- | ---------------------------------------------- |
+| All Companies (default)     | Every company that did not error                |
+| Only Companies With Email   | Only companies with a valid email address       |
+
+A run ends when hipages runs out of companies, or when you cancel it. Cancelling
+stops it between companies and writes no files.
+
+### Still not built
+
+| Feature       | Status | Where it attaches                    |
+| ------------- | ------ | ------------------------------------ |
+| SQLite driver | Absent | `backend/src/repositories/sqlite/`    |
+| Per-row storage | Absent | `resultRepository` — runs export to file, not to the record store |
+| Listing-page route | Stub | `scrapers/hipages/extractor.js`, `selectors.js` |
 
 ---
 
 ## Adding a new directory website
 
-1. Create `backend/src/scrapers/<site>/<site>.source.js` — a descriptor declaring the
+1. Create `backend/src/scrapers/<site>/descriptor.js` — metadata only, declaring the
    site's input fields and output columns.
 2. Register it in `backend/src/scrapers/registry.js` (one line).
 3. Done. The API exposes it, and the UI renders its form automatically from the
-   descriptor.
+   descriptor — no frontend change.
 
-Adding the *scraper implementation* is a separate, isolated step:
-`<site>.scraper.js` extending `BaseScraper`, then `implemented: true`.
+Adding the *scraper implementation* is a separate, isolated step: a `crawler.js`
+and `parser.js` alongside the descriptor, then `implemented: true`. See
+`backend/src/scrapers/hipages/` for the worked example.
 
 ---
 

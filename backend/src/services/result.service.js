@@ -69,8 +69,12 @@ export const resultService = {
       job.export?.files?.[format] ?? (format === EXPORT_FORMAT.CSV ? job.export?.fileName : null);
 
     if (!fileName) {
+      // Only a completed run writes files, so the status is the whole
+      // explanation — a cancelled or failed job has nothing to download and
+      // never will.
       throw ApiError.notFound(
-        `Job "${jobId}" has no ${format} export — it is ${job.status}.`,
+        `This job wrote no ${format.toUpperCase()} file — it is ${job.status}. ` +
+          'Only completed runs produce a download.',
         { jobId, status: job.status, format },
       );
     }
@@ -78,11 +82,11 @@ export const resultService = {
     const filePath = path.join(config.paths.exports, path.basename(fileName));
 
     if (!fs.existsSync(filePath)) {
-      throw ApiError.notFound(`Export file "${fileName}" is no longer on disk.`, {
-        jobId,
-        fileName,
-        format,
-      });
+      throw ApiError.notFound(
+        `The export file "${fileName}" is no longer on disk. ` +
+          'It was moved or deleted after the run; start the scrape again to recreate it.',
+        { jobId, fileName, format },
+      );
     }
 
     return { filePath, fileName };

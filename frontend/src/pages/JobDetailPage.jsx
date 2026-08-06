@@ -1,5 +1,5 @@
 import { Link, useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Ban, Database, RefreshCw, Trash2 } from 'lucide-react';
+import { ArrowLeft, Ban, Database, Download, RefreshCw, Trash2 } from 'lucide-react';
 
 import { PageHeader } from '@/components/common/PageHeader.jsx';
 import { SectionCard } from '@/components/common/SectionCard.jsx';
@@ -13,6 +13,7 @@ import { Skeleton } from '@/components/ui/skeleton.jsx';
 
 import { useCancelJob, useDeleteJob, useJob } from '@/hooks/useJobs.js';
 import { useResults } from '@/hooks/useResults.js';
+import { resultsApi } from '@/api/services/results.api.js';
 import { JOB_STATUS } from '@/lib/constants.js';
 import { formatDateTime, humanizeKey } from '@/lib/utils.js';
 
@@ -22,6 +23,56 @@ function DetailRow({ label, children }) {
     <div className="flex items-start justify-between gap-4 py-2.5">
       <dt className="text-sm text-muted-foreground">{label}</dt>
       <dd className="max-w-[60%] text-right text-sm text-foreground">{children}</dd>
+    </div>
+  );
+}
+
+/**
+ * The files a completed run wrote.
+ *
+ * These links used to exist in one place only — the success panel on the New
+ * Scrape page — which is transient: refreshing the page or navigating away
+ * dropped it, and with it the only route to a file that was sitting on disk the
+ * whole time. A finished run lives here, so this is where its output belongs.
+ *
+ * Rendered only when the job actually wrote something. A cancelled or failed run
+ * has no `export`, and offering a button that resolves to a 404 is worse than
+ * offering none.
+ *
+ * @param {{ job: object }} props
+ */
+function ExportDownloads({ job }) {
+  if (!job.export?.fileName) return null;
+
+  const xlsx = job.export.files?.xlsx;
+
+  return (
+    <div className="space-y-3 border-t border-border pt-4">
+      <div>
+        <p className="text-sm text-muted-foreground">Files</p>
+        {xlsx ? <p className="mt-1 font-mono text-xs text-foreground">{xlsx}</p> : null}
+        <p className="mt-1 font-mono text-xs text-foreground">{job.export.fileName}</p>
+      </div>
+
+      {/* Excel leads and CSV sits under it, matching the New Scrape panel so the
+          same run offers the same two choices in the same order wherever it is
+          looked at. */}
+      <div className="flex flex-wrap gap-2">
+        {xlsx ? (
+          <Button asChild size="sm">
+            <a href={resultsApi.downloadUrl(job.id, 'xlsx')} download>
+              <Download />
+              Download Excel
+            </a>
+          </Button>
+        ) : null}
+        <Button asChild size="sm" variant="outline">
+          <a href={resultsApi.downloadUrl(job.id, 'csv')} download>
+            <Download />
+            Download CSV
+          </a>
+        </Button>
+      </div>
     </div>
   );
 }
@@ -107,18 +158,22 @@ export function JobDetailPage() {
               ))}
             </div>
           ) : (
-            <dl className="divide-y divide-border">
-              <DetailRow label="Status">
-                <StatusBadge status={job.status} />
-              </DetailRow>
-              <DetailRow label="Source">{job.sourceName ?? job.sourceId}</DetailRow>
-              <DetailRow label="Records">
-                <span className="tabular">{job.resultCount ?? 0}</span>
-              </DetailRow>
-              <DetailRow label="Created">{formatDateTime(job.createdAt)}</DetailRow>
-              <DetailRow label="Started">{formatDateTime(job.startedAt)}</DetailRow>
-              <DetailRow label="Finished">{formatDateTime(job.finishedAt)}</DetailRow>
-            </dl>
+            <>
+              <dl className="divide-y divide-border">
+                <DetailRow label="Status">
+                  <StatusBadge status={job.status} />
+                </DetailRow>
+                <DetailRow label="Source">{job.sourceName ?? job.sourceId}</DetailRow>
+                <DetailRow label="Records">
+                  <span className="tabular">{job.resultCount ?? 0}</span>
+                </DetailRow>
+                <DetailRow label="Created">{formatDateTime(job.createdAt)}</DetailRow>
+                <DetailRow label="Started">{formatDateTime(job.startedAt)}</DetailRow>
+                <DetailRow label="Finished">{formatDateTime(job.finishedAt)}</DetailRow>
+              </dl>
+
+              <ExportDownloads job={job} />
+            </>
           )}
         </SectionCard>
 
@@ -142,11 +197,18 @@ export function JobDetailPage() {
             {isLoading || !job ? (
               <Skeleton className="h-20 w-full" />
             ) : (
-              <dl className="grid gap-x-6 sm:grid-cols-2">
+              /* Stacked, not side by side. A category URL is ~55 characters of
+                 unbreakable text, which overflowed its half-width cell and
+                 rendered on top of the next parameter's value. Giving each
+                 parameter the full width and letting the value wrap is what
+                 makes a long URL readable instead of overlapping. */
+              <dl className="divide-y divide-border">
                 {Object.entries(job.params ?? {}).map(([key, value]) => (
-                  <div key={key} className="flex items-center justify-between gap-4 py-2">
-                    <dt className="text-sm text-muted-foreground">{humanizeKey(key)}</dt>
-                    <dd className="font-mono text-sm text-foreground">{String(value)}</dd>
+                  <div key={key} className="flex items-start justify-between gap-6 py-2">
+                    <dt className="shrink-0 text-sm text-muted-foreground">{humanizeKey(key)}</dt>
+                    <dd className="min-w-0 break-all text-right font-mono text-sm text-foreground">
+                      {String(value)}
+                    </dd>
                   </div>
                 ))}
               </dl>
@@ -176,11 +238,21 @@ export function JobDetailPage() {
           rows={results}
           isLoading={resultsLoading}
           emptyState={
+            /* The old wording — "once the scraper engine runs this job" — read as
+               a job still waiting to start, which on a completed run is simply
+               untrue and invited the reader to think the run had done nothing.
+               A run's output goes to the CSV and the workbook; individual rows
+               are not kept in the job store. Saying so is the honest empty
+               state, and it points at where the data actually is. */
             <EmptyState
               className="border-0"
               icon={Database}
-              title="No records yet"
-              description="Records appear here once the scraper engine runs this job."
+              title="Rows are not stored per job"
+              description={
+                job?.export?.fileName
+                  ? 'This run wrote its results to the CSV and Excel files listed under Summary — download them there.'
+                  : 'A completed run writes its results to a CSV and an Excel file rather than to this table.'
+              }
             />
           }
         />

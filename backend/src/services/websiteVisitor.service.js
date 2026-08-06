@@ -181,8 +181,18 @@ export async function visitWebsite(rawUrl, options = {}) {
       htmlBytes,
     };
   } finally {
-    await browser.close();
-    log.info('Browser closed');
+    // Never allowed to throw. A `finally` that raises replaces whatever the body
+    // produced, so a browser that had already crashed would surface as "Target
+    // closed" in place of the real navigation error — and, on the path where the
+    // capture had actually succeeded, would turn it into a failure. There is no
+    // caller who could act on a browser that will not close; logging is the
+    // whole of the correct response.
+    try {
+      await browser.close();
+      log.info('Browser closed');
+    } catch (error) {
+      log.warn('Failed to close website browser — continuing', { message: error?.message });
+    }
   }
 }
 

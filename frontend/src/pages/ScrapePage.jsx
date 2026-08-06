@@ -14,7 +14,7 @@ import { Button } from '@/components/ui/button.jsx';
 import { Skeleton } from '@/components/ui/skeleton.jsx';
 
 import { useSources } from '@/hooks/useSources.js';
-import { useCreateJob, useJobPolling } from '@/hooks/useJobs.js';
+import { useActiveJobRecovery, useCreateJob, useJobPolling } from '@/hooks/useJobs.js';
 import { isTerminalStatus } from '@/lib/constants.js';
 
 /**
@@ -28,6 +28,12 @@ import { isTerminalStatus } from '@/lib/constants.js';
  * Holding the id rather than the job record is the point: the record is stale
  * the instant it arrives, so there is exactly one source of truth for the run's
  * state, and it is the server.
+ *
+ * Which is also why a refresh does not lose a run. The id lives in React state
+ * and a reload discards it, but the run never belonged to the page — it belongs
+ * to the backend, which is still scraping. On mount the page asks which job is
+ * unfinished and picks the thread back up. Nothing is remembered on the client
+ * to make that work.
  */
 export function ScrapePage() {
   const navigate = useNavigate();
@@ -35,6 +41,15 @@ export function ScrapePage() {
 
   const [selectedSourceId, setSelectedSourceId] = useState(null);
   const [activeJobId, setActiveJobId] = useState(null);
+
+  // Only until this session starts one of its own — after that the page's own
+  // id is the truth and recovery has nothing to add.
+  const [hasStartedHere, setHasStartedHere] = useState(false);
+  const recovered = useActiveJobRecovery(!hasStartedHere);
+
+  useEffect(() => {
+    if (!hasStartedHere && recovered.jobId) setActiveJobId(recovered.jobId);
+  }, [hasStartedHere, recovered.jobId]);
 
   // Pre-select the first source once the list arrives.
   useEffect(() => {
@@ -55,6 +70,7 @@ export function ScrapePage() {
   const isBusy = createJob.isPending || isJobActive;
 
   const handleSubmit = async (payload) => {
+    setHasStartedHere(true);
     setActiveJobId(null);
     await createJob.mutate(payload);
   };
