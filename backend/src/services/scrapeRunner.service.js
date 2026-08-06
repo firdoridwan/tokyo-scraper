@@ -14,16 +14,17 @@
  *
  * What a run is aiming at
  * -----------------------
- * A job asks for a number of EMAILS. The pipeline decides when it has them and
- * hands back only the companies that qualified; this module's share of that
- * requirement is entirely in how the outcome is worded and measured — see
- * `toProgress()` and `completionMessage()`. It applies no filter of its own and
- * neither do the exporters, which write every record they are given.
+ * A job asks for a whole category, in one of two SCRAPING MODES. Every company
+ * hipages lists is opened and checked either way; the mode decides only which
+ * of them the pipeline hands back. This module's share of that requirement is
+ * entirely in how the outcome is worded and measured — see `toProgress()` and
+ * `completionMessage()`. It applies no filter of its own and neither do the
+ * exporters, which write every record they are given.
  *
- * A run that empties hipages before hitting the target is COMPLETED, at 100%,
- * with a message saying the source ran out. It is not a warning, not a partial
- * success and not a failure: the category holds about a hundred businesses and
- * only some publish an address, so this is the ordinary ending.
+ * Because the run is never cut short, a completed job has always reached the
+ * end of the source. That is the ordinary ending, not a shortfall: the category
+ * holds about a hundred businesses, and having checked all of them is the job
+ * done.
  *
  * Asynchronous by design
  * ----------------------
@@ -46,7 +47,7 @@
  * workbook are this milestone's output, and none of those were asked for.
  */
 import { JOB_STATUS, TERMINAL_JOB_STATUSES } from '../config/constants.js';
-import { runPipeline } from './scrapingPipeline.service.js';
+import { runPipeline, toScrapingMode, SCRAPING_MODE } from './scrapingPipeline.service.js';
 import { exportCompaniesToCsv } from './csvExporter.service.js';
 import { exportCompaniesToXlsx } from './excelExporter.service.js';
 import { ApiError } from '../utils/ApiError.js';
@@ -67,6 +68,7 @@ const activeRuns = new Map();
 const EMPTY_SUMMARY = Object.freeze({
   discovered: 0,
   processed: 0,
+  exported: 0,
   skipped: 0,
   failed: 0,
   emailsFound: 0,
@@ -85,56 +87,61 @@ const quantity = (value, singular, plural) => `${value} ${value === 1 ? singular
 /**
  * How far through the job the run is, as a percentage.
  *
- * This measures completion of the JOB, not attainment of the target, and the
- * distinction decides the number. A run finishes when EITHER enough emails have
- * been collected OR the source runs dry, so progress is how close the run is to
- * whichever ending arrives first — the larger of the two ratios.
+ * Companies processed against companies discovered — the work done over the
+ * work there is. Nothing else, and deliberately nothing about the mode: both
+ * modes open every company, so a bar that moved differently between them would
+ * be reporting a difference that does not exist in the run.
  *
- * Reporting only `emailsFound / target` would strand an exhausted run at, say,
- * 62% and then snap it to 100% at the end, which reads as a bar that gave up.
- * Reporting only `processed / discovered` would race towards 100% while
- * collecting nothing. The maximum of the two rises smoothly under either
- * ending and arrives at 100% exactly when the run is over.
+ * It used to blend in `emailsFound / target`, because a run could end early on
+ * a target. None can now, so the single ratio rises smoothly and arrives at
+ * 100% exactly when the last company has been checked.
+ *
+ * Before discovery lands, `discovered` is 0 and so is the bar — which is
+ * truthful: nothing is known about the size of the run yet.
  *
  * @param {typeof EMPTY_SUMMARY} summary
- * @param {number|null} target Requested email count, or null for "no target"
  * @returns {number} 0–100
  */
-export function toProgress(summary, target) {
-  const towardsTarget = target ? summary.emailsFound / target : 0;
-  const towardsExhaustion = summary.discovered ? summary.processed / summary.discovered : 0;
-
-  return Math.min(100, Math.round(Math.max(towardsTarget, towardsExhaustion) * 100));
+export function toProgress(summary) {
+  if (!summary.discovered) return 0;
+  return Math.min(100, Math.round((summary.processed / summary.discovered) * 100));
 }
 
 /**
  * The sentence a finished run is described by.
  *
- * Both endings are a success. An exhausted source is not a warning and not a
- * shortfall to apologise for — hipages holds roughly a hundred businesses per
- * category and suburb, so running out of them is an ordinary, expected way for
- * a run to finish. The message says which ending it was, because that is the
- * one thing the counters cannot show.
+ * A completed run has always reached the end of the source, so the message has
+ * one job the counters cannot do: say what the mode did to the file. "84 checked
+ * and 84 exported" and "84 checked, 31 exported" are the same successful run
+ * under different modes, and an operator who reads only the second number needs
+ * to be told which one they asked for.
  *
- * @param {import('./scrapingPipeline.service.js').StopReason} stopReason
+ * It takes no `stopReason`. A cancelled run never reaches here — `run()` hands
+ * that ending to `finishCancelled()` — so the only reason left is the source
+ * running out, and a parameter that can hold exactly one value is a parameter
+ * that will eventually be passed the wrong thing.
+ *
  * @param {typeof EMPTY_SUMMARY} summary
- * @param {number|null} target
+ * @param {import('./scrapingPipeline.service.js').ScrapingMode} mode
  * @returns {string}
  */
-export function completionMessage(stopReason, summary, target) {
-  const emails = quantity(summary.emailsFound, 'email', 'emails');
+export function completionMessage(summary, mode) {
   const checked = quantity(summary.processed, 'company', 'companies');
+  const exported = quantity(summary.exported, 'company', 'companies');
 
-  if (stopReason === 'source-exhausted') {
+  if (toScrapingMode(mode) === SCRAPING_MODE.WITH_EMAIL) {
     return (
-      `Hipages has no more companies. ${emails} ` +
-      `${summary.emailsFound === 1 ? 'was' : 'were'} collected from ${checked} checked.`
+      `Hipages has no more companies. ${checked} ` +
+      `${summary.processed === 1 ? 'was' : 'were'} checked and ${exported} with an email ` +
+      `${summary.exported === 1 ? 'was' : 'were'} exported.`
     );
   }
 
   return (
-    `Target of ${quantity(target ?? summary.emailsFound, 'email', 'emails')} reached. ` +
-    `${checked} ${summary.processed === 1 ? 'was' : 'were'} checked.`
+    `Hipages has no more companies. ${checked} ` +
+    `${summary.processed === 1 ? 'was' : 'were'} checked and ${exported} ` +
+    `${summary.exported === 1 ? 'was' : 'were'} exported, ` +
+    `${quantity(summary.emailsFound, 'email', 'emails')} found.`
   );
 }
 
@@ -182,15 +189,18 @@ function finishCancelled(job, jobRepository, summary) {
   logger.warn('Job cancelled mid-run', {
     jobId: job.id,
     checked: summary.processed,
-    emailsFound: summary.emailsFound,
+    exported: summary.exported,
   });
 
   return jobRepository.update(job.id, {
     status: JOB_STATUS.CANCELLED,
     message:
-      `Cancelled after ${quantity(summary.emailsFound, 'email', 'emails')} collected from ` +
-      `${quantity(summary.processed, 'company', 'companies')} checked.`,
-    resultCount: summary.emailsFound,
+      `Cancelled after ${quantity(summary.processed, 'company', 'companies')} checked, ` +
+      `${quantity(summary.emailsFound, 'email', 'emails')} found.`,
+    // Nothing was written, so nothing was exported. The counter reports the
+    // companies that WOULD have qualified, which is the honest number to show
+    // beside a run that stopped before its files existed.
+    resultCount: summary.exported,
     summary,
     finishedAt: new Date().toISOString(),
   });
@@ -254,14 +264,13 @@ export const scrapeRunner = {
     logger.info('Job started', { jobId: job.id, sourceId: job.sourceId, params });
 
     /**
-     * The email target, and the denominator half of the progress bar.
+     * The one choice the operator made.
      *
-     * `limit` keeps its name and its place as the one number the operator sets;
-     * what it counts is now emails rather than companies. The pipeline reads it
-     * the same way — see `toEmailTarget()` — so the two cannot disagree about
-     * what an absent or nonsensical value means.
+     * Normalised through the pipeline's own `toScrapingMode()` rather than read
+     * raw, so the runner's wording and the pipeline's filtering cannot form two
+     * different opinions about what an absent or unrecognised value means.
      */
-    const target = params.limit > 0 ? Number(params.limit) : null;
+    const mode = toScrapingMode(params.scrapingMode);
 
     /**
      * Live counters, published on the job after every company.
@@ -282,9 +291,12 @@ export const scrapeRunner = {
     const publish = (message) => {
       jobRepository.update(job.id, {
         summary: { ...live },
-        // What the run produces is emails, so that is what a result count is.
-        resultCount: live.emailsFound,
-        progress: toProgress(live, target),
+        // What the run produces is rows in a file, so that is what a result
+        // count is. Under `all` it tracks companies checked; under `with-email`
+        // it tracks companies with an address — one field, one meaning, and the
+        // mode is what changes the number.
+        resultCount: live.exported,
+        progress: toProgress(live),
         message,
       });
     };
@@ -300,13 +312,12 @@ export const scrapeRunner = {
       // Only the parameters the source declares reach this point — anything
       // else was dropped by `normalizeParams()` against the descriptor.
       //
-      // An email count is the whole request. How many companies it takes to
-      // find that many addresses is not knowable in advance and is nothing an
-      // operator should be asked to estimate.
+      // A category and a mode are the whole request. There is no size to pass:
+      // the run is the whole category, and the mode never shortens it.
       const { records, summary, stopReason } = await runPipeline(
         {
           categoryUrl: requireCategoryUrl(params.categoryUrl),
-          limit: params.limit,
+          mode,
         },
         {
           signal: controller.signal,
@@ -318,14 +329,15 @@ export const scrapeRunner = {
             );
           },
 
-          // One call per company checked, qualified or not. The record is
-          // ignored here: the counters already say everything the job record
-          // publishes, and the rows themselves go to the exporters at the end.
+          // One call per company checked, in both modes, whether or not that
+          // company will be exported. The record is ignored here: the counters
+          // already say everything the job record publishes, and the rows
+          // themselves go to the exporters at the end.
           onProgress: (snapshot) => {
             live = snapshot;
             publish(
               `Running — ${quantity(live.processed, 'company', 'companies')} checked, ` +
-                `${quantity(live.emailsFound, 'email', 'emails')} found.`,
+                `${quantity(live.exported, 'company', 'companies')} to export.`,
             );
           },
         },
@@ -349,7 +361,9 @@ export const scrapeRunner = {
       logger.info('Job completed', {
         jobId: job.id,
         stopReason,
+        mode,
         checked: summary.processed,
+        exported: summary.exported,
         emailsFound: summary.emailsFound,
         csv: csv.fileName,
         xlsx: xlsx.fileName,
@@ -357,12 +371,13 @@ export const scrapeRunner = {
 
       return jobRepository.update(job.id, {
         status: JOB_STATUS.COMPLETED,
-        // 100 regardless of which ending arrived. An exhausted source is a
-        // finished job, not a stalled one, and a bar left short of the end
-        // would report it as the failure it is not.
+        // 100 explicitly. `toProgress()` already lands there when every company
+        // was checked, but a run whose discovery count and processed count
+        // disagree for any reason is still a finished job, and a bar left short
+        // of the end would report it as the failure it is not.
         progress: 100,
-        resultCount: summary.emailsFound,
-        message: completionMessage(stopReason, summary, target),
+        resultCount: summary.exported,
+        message: completionMessage(summary, mode),
         finishedAt: new Date().toISOString(),
         summary,
         export: {

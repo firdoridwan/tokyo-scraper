@@ -18,22 +18,22 @@ import { JOB_STATUS } from '@/lib/constants.js';
  * keeps "when do we stop asking?" a single decision in a single place.
  *
  * The backend's `message` is rendered verbatim in every state. It already says
- * things like "Running — 12 companies checked, 5 emails found." and "Hipages
- * has no more companies. 31 emails were collected from 100 companies checked."
- * — re-deriving that sentence here would give the UI a second opinion about
- * what the run is doing.
+ * things like "Running — 12 companies checked, 5 to export." and "Hipages has
+ * no more companies. 84 companies were checked and 31 with an email were
+ * exported." — re-deriving that sentence here would give the UI a second
+ * opinion about what the run is doing.
  *
  * What the run is counted in
  * --------------------------
- * The goal is emails, so emails lead. A company with no website, or with no
- * address on the website it has, is checked and dropped; it is not an error and
- * gets no counter of its own. Three numbers describe the run — how many emails
- * were collected, how many companies that took, and how many broke.
+ * Companies, throughout. Every company hipages lists is opened in both scraping
+ * modes, so the progress bar and the first two counters read identically
+ * whichever mode was chosen; only "Exported" moves between them. That is the
+ * point of showing it beside the others rather than instead of them — the gap
+ * between checked and exported is the mode, made visible.
  *
- * A run that empties hipages before reaching the target completes normally, at
- * 100%, in the success state. It collected everything there was to collect,
- * which is the job done rather than the job failed; the message explains the
- * ending.
+ * A run ends when hipages runs out of companies. There is no target to fall
+ * short of, so a completed run is always the whole source, at 100%, in the
+ * success state.
  */
 
 /** One counter from the run. */
@@ -47,24 +47,27 @@ function Counter({ label, value }) {
 }
 
 /**
- * The three counters, in goal-first order.
+ * The run's counters, in the order the run produces them.
  *
- * Emails found is shown against the target when the job carries one, because
- * "31" alone does not say whether the run is a third of the way through or
- * finished. The target comes off the job's own params, so it is whatever was
- * actually requested rather than a constant duplicated in the frontend.
+ * Discovered → processed → exported is the actual sequence of the pipeline, so
+ * reading them left to right reads the run. Emails found and failed follow as
+ * the two facts the first three do not carry.
+ *
+ * Every value is taken straight off `job.summary`, which the backend recomputes
+ * after each company. Nothing is derived here — a subtraction in this component
+ * would be a second, staler tally of numbers the pipeline already keeps.
  *
  * @param {{ job: object }} props
  */
 function Counters({ job }) {
   const summary = job.summary ?? {};
-  const target = Number(job.params?.limit) > 0 ? Number(job.params.limit) : null;
-  const found = summary.emailsFound ?? 0;
 
   return (
     <dl className="grid grid-cols-3 gap-2">
-      <Counter label="Emails found" value={target ? `${found} / ${target}` : found} />
-      <Counter label="Companies checked" value={summary.processed ?? 0} />
+      <Counter label="Discovered" value={summary.discovered ?? 0} />
+      <Counter label="Processed" value={summary.processed ?? 0} />
+      <Counter label="Exported" value={summary.exported ?? 0} />
+      <Counter label="Emails found" value={summary.emailsFound ?? 0} />
       <Counter label="Failed" value={summary.failed ?? 0} />
     </dl>
   );

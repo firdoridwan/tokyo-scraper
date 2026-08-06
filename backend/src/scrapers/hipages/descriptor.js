@@ -33,20 +33,27 @@ const SUPPORTED_INPUTS = [
     helpText: 'Paste a hipages category page URL. Its pagination is walked from here.',
   },
   {
-    // The key stays `limit` — it is still the one ceiling an operator sets, and
-    // every layer below reads it under that name. Only what it counts changed:
-    // emails collected, not companies opened. The label is where that is said.
-    name: 'limit',
-    label: 'Target Emails',
-    type: 'number',
+    // Replaces the old `limit` / "Target Emails" field. Nothing bounds a run any
+    // more — every company hipages lists is opened in both modes — so the one
+    // choice left to the operator is which of them end up in the files.
+    //
+    // The option values are the literals `scrapingPipeline.SCRAPING_MODE` holds.
+    // They are repeated rather than imported because this file imports nothing
+    // by design (see the header); `toScrapingMode()` is what they are validated
+    // against, and it defaults anything unrecognised to `all`.
+    name: 'scrapingMode',
+    label: 'Scraping Mode',
+    type: 'select',
     required: false,
-    min: 1,
-    max: 50,
-    defaultValue: 10,
+    defaultValue: 'all',
+    options: [
+      { value: 'all', label: 'All Companies' },
+      { value: 'with-email', label: 'Only Companies With Email' },
+    ],
     helpText:
-      'Companies are checked until this many valid email addresses have been collected, ' +
-      'or until hipages runs out of companies. Companies with no website, or no email on ' +
-      'their website, are skipped and not exported.',
+      'Every company hipages lists is checked either way, and the run always ends at the ' +
+      'end of the source. This only decides what is exported: every company, or only the ' +
+      'ones with an email address.',
   },
 ];
 

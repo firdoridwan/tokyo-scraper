@@ -6,19 +6,24 @@
  *
  * Usage
  * -----
- *   node backend/src/services/scrapingPipeline.test.js [categoryUrl] [targetEmails]
- *   node backend/src/services/scrapingPipeline.test.js --urls <profileUrl>[,<profileUrl>...]
- *   node backend/src/services/scrapingPipeline.test.js <categoryUrl> <targetEmails> --json
+ *   node backend/src/services/scrapingPipeline.test.js [categoryUrl] [all|with-email]
+ *   node backend/src/services/scrapingPipeline.test.js --urls <profileUrl>[,<profileUrl>...] [mode]
+ *   node backend/src/services/scrapingPipeline.test.js <categoryUrl> <mode> --json
  *
- * `targetEmails` is how many valid addresses to collect before stopping — the
- * run checks as many companies as that takes, or every company hipages has,
- * whichever comes first. Omit it and the run only stops at the end of the
- * source, which is a long one. `--json` additionally dumps the complete record
- * objects, which is how the full field set (reviews, gallery, credentials …)
- * gets eyeballed.
+ * The mode decides which companies are EXPORTED, never which are checked — both
+ * modes open every company hipages lists and the run always ends at the end of
+ * the source, so a `with-email` run takes exactly as long as an `all` run over
+ * the same category. Omit it and the run defaults to `all`.
+ *
+ * Every checked company prints a block, tagged EXPORTED or DROPPED, which is
+ * what makes the two modes comparable by eye: the same companies appear in the
+ * same order under both, and only the tags differ.
+ *
+ * `--json` additionally dumps the exported record objects, which is how the
+ * full field set (reviews, gallery, credentials …) gets eyeballed.
  */
 import { pathToFileURL } from 'node:url';
-import { runPipeline } from './scrapingPipeline.service.js';
+import { runPipeline, toScrapingMode, SCRAPING_MODE } from './scrapingPipeline.service.js';
 
 const DEFAULT_CATEGORY_URL = 'https://hipages.com.au/find/electricians/nsw/sydney';
 const RULE = '-'.repeat(40);
@@ -29,10 +34,14 @@ const show = (value) => value ?? '—';
 /**
  * @param {import('./scrapingPipeline.service.js').CompanyRecord} record
  * @param {import('./scrapingPipeline.service.js').PipelineSummary} summary
+ * @param {boolean} exported
  */
-function printCompany(record, summary) {
+function printCompany(record, summary, exported) {
   process.stdout.write(`\n${RULE}\n\n`);
-  process.stdout.write(`Email ${summary.emailsFound} (company ${summary.processed} checked)\n\n`);
+  process.stdout.write(
+    `Company ${summary.processed} of ${summary.discovered} — ` +
+      `${exported ? 'EXPORTED' : 'DROPPED'}\n\n`,
+  );
   process.stdout.write(`Company: ${show(record.companyName)}\n\n`);
   process.stdout.write(`Website: ${show(record.website)}\n\n`);
   process.stdout.write(`Email: ${show(record.email)}\n\n`);
@@ -44,15 +53,32 @@ function printCompany(record, summary) {
 /**
  * @param {import('./scrapingPipeline.service.js').PipelineSummary} summary
  * @param {import('./scrapingPipeline.service.js').StopReason} stopReason
+ * @param {import('./scrapingPipeline.service.js').ScrapingMode} mode
+ * @param {number} exportedRecords Length of the returned array
  */
-function printSummary(summary, stopReason) {
+function printSummary(summary, stopReason, mode, exportedRecords) {
+  // The invariant each mode is supposed to satisfy, printed beside the numbers
+  // so a run either demonstrates it or visibly does not.
+  const expected =
+    mode === SCRAPING_MODE.WITH_EMAIL
+      ? summary.emailsFound
+      : summary.processed - summary.failed;
+
   process.stdout.write('\nFinal Summary\n\n');
+  process.stdout.write(`Scraping mode:        ${mode}\n`);
   process.stdout.write(`Stopped because:      ${stopReason}\n`);
-  process.stdout.write(`Companies available:  ${summary.discovered}\n`);
-  process.stdout.write(`Companies checked:    ${summary.processed}\n`);
-  process.stdout.write(`Companies skipped:    ${summary.skipped}\n`);
-  process.stdout.write(`Companies failed:     ${summary.failed}\n`);
-  process.stdout.write(`Emails found:         ${summary.emailsFound}\n\n`);
+  process.stdout.write(`Companies discovered: ${summary.discovered}\n`);
+  process.stdout.write(`Companies processed:  ${summary.processed}\n`);
+  process.stdout.write(`Companies exported:   ${summary.exported}\n`);
+  process.stdout.write(`Emails found:         ${summary.emailsFound}\n`);
+  process.stdout.write(`Failed:               ${summary.failed}\n\n`);
+  process.stdout.write(`Records returned:     ${exportedRecords}\n`);
+  process.stdout.write(
+    `Expected exported:    ${expected} ` + `${expected === summary.exported ? '✓' : '✗ MISMATCH'}\n`,
+  );
+  process.stdout.write(
+    `Records match count:  ${exportedRecords === summary.exported ? '✓' : '✗ MISMATCH'}\n\n`,
+  );
 }
 
 /** CLI entry point — only runs when this file is executed directly. */
@@ -62,7 +88,7 @@ async function main() {
   const positional = args.filter((arg) => arg !== '--json');
 
   try {
-    /** @type {{ categoryUrl?: string, profileUrls?: string[], limit?: number }} */
+    /** @type {{ categoryUrl?: string, profileUrls?: string[], mode: string }} */
     let params;
 
     if (positional[0] === '--urls') {
@@ -71,29 +97,26 @@ async function main() {
         .map((url) => url.trim())
         .filter(Boolean);
       if (profileUrls.length === 0) throw new Error('--urls requires at least one URL.');
-      params = { profileUrls };
+      params = { profileUrls, mode: toScrapingMode(positional[2]) };
     } else {
-      const categoryUrl = positional[0] ?? DEFAULT_CATEGORY_URL;
-      const limit = positional[1] ? Number.parseInt(positional[1], 10) : undefined;
-      if (positional[1] && !Number.isInteger(limit)) {
-        throw new Error(`limit must be an integer, received "${positional[1]}".`);
-      }
-      params = { categoryUrl, limit };
+      params = {
+        categoryUrl: positional[0] ?? DEFAULT_CATEGORY_URL,
+        mode: toScrapingMode(positional[1]),
+      };
     }
 
     const startedAt = Date.now();
     const { records, summary, stopReason } = await runPipeline(params, {
       onDiscovered: ({ discovered }) =>
-        process.stdout.write(`\nDiscovered ${discovered} company URL(s) to draw from\n`),
-      // Only companies that qualified print a block. The dropped ones are in
-      // the counters — printing one block per skip would bury the hits.
-      onProgress: (snapshot, record) => {
-        if (record) printCompany(record, snapshot);
-      },
+        process.stdout.write(`\nDiscovered ${discovered} company URL(s) — all will be checked\n`),
+      // Every company prints, exported or not. Under `all` that is the file;
+      // under `with-email` the DROPPED blocks are exactly the difference
+      // between the two modes, which is the thing worth seeing.
+      onProgress: (snapshot, record, info) => printCompany(record, snapshot, info.exported),
     });
     const elapsedMs = Date.now() - startedAt;
 
-    printSummary(summary, stopReason);
+    printSummary(summary, stopReason, params.mode, records.length);
     process.stdout.write(`Elapsed: ${(elapsedMs / 1000).toFixed(1)}s\n\n`);
 
     if (asJson) process.stdout.write(`${JSON.stringify(records, null, 2)}\n`);

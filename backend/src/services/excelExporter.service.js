@@ -227,9 +227,9 @@ function buildSummarySheet(sheet, entries) {
  *   fileName?: string,
  *   now?: Date
  * }} [options] `summary` is the pipeline's own count — passed in rather than
- *   recomputed, because only the run knows how many companies were *discovered*
- *   before `limit` trimmed the list. Without it the counts are derived from the
- *   records alone.
+ *   recomputed, because only the run saw the companies that were checked and
+ *   then dropped by the scraping mode. Without it the counts are derived from
+ *   the records alone, which can only ever describe what survived.
  * @returns {Promise<ExcelExportResult>}
  */
 export async function exportCompaniesToXlsx(records, options = {}) {

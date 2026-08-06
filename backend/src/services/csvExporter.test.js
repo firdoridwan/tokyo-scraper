@@ -13,15 +13,17 @@
  *
  * Usage
  * -----
- *   node backend/src/services/csvExporter.test.js [categoryUrl] [limit]
- *   node backend/src/services/csvExporter.test.js --urls <profileUrl>[,<profileUrl>...]
+ *   node backend/src/services/csvExporter.test.js [categoryUrl] [all|with-email]
+ *   node backend/src/services/csvExporter.test.js --urls <profileUrl>[,<profileUrl>...] [mode]
  *
- * `limit` caps how many discovered companies are processed — a full category is
- * a long run. Defaults to the electricians/Sydney category.
+ * The second argument is the SCRAPING MODE, not a size. Nothing caps a run any
+ * more — every company in the category is checked under either mode — so pick a
+ * small category (a regional suburb) rather than the Sydney default when you
+ * want a short one.
  */
 import fs from 'node:fs/promises';
 import { pathToFileURL } from 'node:url';
-import { runPipeline } from './scrapingPipeline.service.js';
+import { runPipeline, toScrapingMode } from './scrapingPipeline.service.js';
 import { exportCompaniesToCsv } from './csvExporter.service.js';
 
 const DEFAULT_CATEGORY_URL = 'https://hipages.com.au/find/electricians/nsw/sydney';
@@ -55,7 +57,7 @@ async function main() {
   const args = process.argv.slice(2);
 
   try {
-    /** @type {{ categoryUrl?: string, profileUrls?: string[], limit?: number }} */
+    /** @type {{ categoryUrl?: string, profileUrls?: string[], mode: string }} */
     let params;
 
     if (args[0] === '--urls') {
@@ -64,24 +66,18 @@ async function main() {
         .map((url) => url.trim())
         .filter(Boolean);
       if (profileUrls.length === 0) throw new Error('--urls requires at least one URL.');
-      params = { profileUrls };
+      params = { profileUrls, mode: toScrapingMode(args[2]) };
     } else {
-      const categoryUrl = args[0] ?? DEFAULT_CATEGORY_URL;
-      const limit = args[1] ? Number.parseInt(args[1], 10) : undefined;
-      if (args[1] && !Number.isInteger(limit)) {
-        throw new Error(`limit must be an integer, received "${args[1]}".`);
-      }
-      params = { categoryUrl, limit };
+      params = { categoryUrl: args[0] ?? DEFAULT_CATEGORY_URL, mode: toScrapingMode(args[1]) };
     }
 
     const { records, summary } = await runPipeline(params, {
       onDiscovered: ({ discovered }) =>
-        process.stdout.write(`\nDiscovered ${discovered} company URL(s) to draw from\n`),
-      onProgress: (snapshot, record) =>
+        process.stdout.write(`\nDiscovered ${discovered} company URL(s) — all will be checked\n`),
+      onProgress: (snapshot, record, info) =>
         process.stdout.write(
-          record
-            ? `  ${String(snapshot.emailsFound).padStart(3)}  KEPT     ${record.companyName ?? '—'} <${record.email}>\n`
-            : `       skipped  (${snapshot.processed} checked)\n`,
+          `  ${String(snapshot.processed).padStart(3)}  ${info.exported ? 'EXPORTED' : 'DROPPED '} ` +
+            `${record.companyName ?? '—'} <${record.email ?? '—'}>\n`,
         ),
     });
 
@@ -89,7 +85,9 @@ async function main() {
     const verified = await verifyFile(exported.filePath);
 
     process.stdout.write(`\n${RULE}\n\n`);
+    process.stdout.write(`Scraping Mode: ${params.mode}\n\n`);
     process.stdout.write(`Companies Processed: ${summary.processed}\n\n`);
+    process.stdout.write(`Companies Exported: ${summary.exported}\n\n`);
     process.stdout.write(`Rows Written: ${exported.rowsWritten}\n\n`);
     process.stdout.write(`CSV Path: ${exported.filePath}\n\n`);
     process.stdout.write(`Export Success: ${verified.exists ? 'YES' : 'NO'}\n\n`);
@@ -99,11 +97,22 @@ async function main() {
     process.stdout.write(`Header:       ${verified.headerLine ?? '—'}\n`);
     process.stdout.write(`Data lines:   ${verified.dataLines}\n\n`);
 
-    // A row per company is the sprint's rule; a mismatch is a failure, not a note.
-    if (!verified.exists || exported.rowsWritten !== summary.processed) {
+    // One row per EXPORTED company. `summary.exported` is what the mode decided
+    // and `rowsWritten` is what the file actually holds, so comparing them is
+    // the real check: it catches an exporter that dropped a record as well as a
+    // predicate the exporter disagreed with. A mismatch is a failure, not a note.
+    if (!verified.exists || exported.rowsWritten !== summary.exported) {
       throw new Error(
-        `Export mismatch — ${summary.processed} companies processed, ` +
-          `${exported.rowsWritten} rows written, file exists: ${verified.exists}.`,
+        `Export mismatch — ${summary.exported} companies exported under mode ` +
+          `"${params.mode}", ${exported.rowsWritten} rows written, ` +
+          `file exists: ${verified.exists}.`,
+      );
+    }
+
+    // And the file's own data lines have to agree with both.
+    if (verified.dataLines !== summary.exported) {
+      throw new Error(
+        `File mismatch — ${summary.exported} exported, ${verified.dataLines} data lines on disk.`,
       );
     }
   } catch (error) {
